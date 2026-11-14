@@ -10,6 +10,7 @@
 #include <QStringList>
 #include <QTimer>
 #include <QVector>
+#include <functional>
 #include <optional>
 
 struct TaskList {
@@ -99,8 +100,13 @@ public:
     double endPosition(qint64 listId) const;
     qint64 defaultListId();
 
+    // A transaction reaches the disk whole or not at all. When a write in it
+    // fails, failed() says why, the rest is skipped, and memory and undo are
+    // left as they were; commit() then returns false.
     void begin(const QString &mergeKey = {});
-    void commit();
+    bool commit();
+    // Each returns the id, or 0 when it could not be saved. An open reminder
+    // reopens a completed parent, in the same step.
     qint64 put(Reminder reminder);
     qint64 put(TaskList list);
     qint64 put(Section section);
@@ -112,8 +118,10 @@ public:
     // Completing a repeating reminder leaves a completed copy behind and
     // moves the reminder to its next date, which is returned.
     QDate complete(qint64 id, const QDateTime &now);
-    void reopen(qint64 id);
+    void reopen(qint64 id); // and its parent, if that was completed
 
+    // Undo and redo leave alone what another process has changed since:
+    // the steps that would write over it are forgotten, and the rest stay.
     bool canUndo() const { return !m_undo.isEmpty(); }
     bool canRedo() const { return !m_redo.isEmpty(); }
     void undo();
@@ -128,6 +136,10 @@ public:
 
     void watch(); // reload when another process changes the file
     bool reloadIfChanged();
+
+    // For tests: runs part way through reading the file, so another
+    // connection can change it at just that moment.
+    void setLoadHook(std::function<void()> hook) { m_loadHook = std::move(hook); }
 
 signals:
     void changed();
@@ -147,21 +159,32 @@ private:
         bool isEmpty() const { return lists.isEmpty() && sections.isEmpty() && reminders.isEmpty(); }
     };
 
+    struct Rows; // by table
+
     bool run(const QString &sql);
     void fail(const QString &message);
     void prepare();
-    void load();
+    bool load();
+    void repair();
+    qint64 pragma(const char *name);
     qint64 dataVersion();
     void arm();
     bool write(Reminder &reminder);
     bool write(TaskList &list);
     bool write(Section &section);
-    void erase(const char *table, qint64 id);
+    bool erase(const char *table, qint64 id);
     void eraseReminder(qint64 id);
-    void apply(qint64 id, const std::optional<Reminder> &state);
     void apply(qint64 id, const std::optional<TaskList> &state);
     void apply(qint64 id, const std::optional<Section> &state);
-    void replay(const UndoEntry &entry, bool forward);
+    bool finish();
+    void revert(const UndoEntry &entry);
+    bool lockFresh();
+    bool replay(const UndoEntry &entry, bool forward);
+    void restore(qint64 id, const std::optional<Reminder> &state);
+    void restore(qint64 id, const std::optional<TaskList> &state);
+    void restore(qint64 id, const std::optional<Section> &state);
+    static UndoEntry inverse(const UndoEntry &entry);
+    void forget(const Rows &touched, const Rows &held, const Rows &gone);
     void sortLists();
 
     QString m_path, m_connection, m_error;
@@ -169,6 +192,7 @@ private:
     QSqlQuery m_putReminder, m_putList, m_putSection, m_setAlerted;
     bool m_open = false;
     bool m_recording = true;
+    bool m_broken = false; // a write in the transaction under way failed
     int m_depth = 0;
     qint64 m_dataVersion = 0;
 
@@ -182,4 +206,5 @@ private:
     QFileSystemWatcher m_watcher;
     QTimer m_reload;
     bool m_watching = false;
+    std::function<void()> m_loadHook;
 };

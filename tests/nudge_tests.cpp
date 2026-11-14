@@ -618,6 +618,397 @@ private slots:
         QCOMPARE(window.reminder(id)->alertedDue, 123);
     }
 
+    // ---- store (review fixes) ----
+
+private:
+    // Changes the file behind the store's back, as another program would.
+    static void tamper(const QString &path, const QString &sql) {
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "tamper");
+            db.setDatabaseName(path);
+            QVERIFY(db.open());
+            QVERIFY(QSqlQuery(db).exec(sql));
+        }
+        QSqlDatabase::removeDatabase("tamper");
+    }
+
+    static void retitle(Store &store, qint64 id, const QString &title, const QString &mergeKey = {}) {
+        Store::Tx tx(&store, mergeKey);
+        Reminder r = *store.reminder(id);
+        r.title = title;
+        store.put(r);
+    }
+
+private slots:
+    void aReloadReadsOneMomentOfTheFile() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path), commandLine(path);
+        const qint64 home = addList(commandLine, "Home");
+        // Part way through the window's reading, the command line adds a
+        // list with a reminder in it.
+        qint64 work = 0, report = 0;
+        bool once = true;
+        window.setLoadHook([&] {
+            if (!std::exchange(once, false))
+                return;
+            Store::Tx tx(&commandLine);
+            work = addList(commandLine, "Work");
+            report = add(commandLine, work, "Send the report");
+        });
+        QVERIFY(window.reloadIfChanged());
+        QVERIFY(window.list(home));
+        // It shows up whole the next time, not half of it now and the rest never.
+        QVERIFY(!window.reminder(report));
+        QVERIFY(window.reloadIfChanged());
+        QVERIFY(window.list(work));
+        QVERIFY(window.reminder(report));
+        QCOMPARE(window.reminder(report)->listId, work);
+    }
+
+    void aCommandThatOnlyReadsLeavesOthersAlone() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path);
+        add(window, addList(window, "Home"), "Milk");
+        int loads = 0;
+        window.setLoadHook([&loads] { ++loads; });
+        {
+            Store list(path); // nudge list
+            QCOMPARE(list.reminders().size(), 1);
+        }
+        QVERIFY(!window.reloadIfChanged());
+        QCOMPARE(loads, 0);
+    }
+
+    void aDeleteThatFailsChangesNothing() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        const qint64 id = add(store, addList(store, "Home"), "Milk");
+        store.clearUndo();
+        tamper(path, "CREATE TRIGGER refuse BEFORE DELETE ON reminders BEGIN SELECT RAISE(ABORT, 'disk is full'); END");
+        QSignalSpy failed(&store, &Store::failed);
+        store.removeReminder(id);
+        QVERIFY(store.reminder(id));
+        QVERIFY(!store.canUndo());
+        QCOMPARE(failed.count(), 1);
+        QVERIFY(store.error().contains("disk is full"));
+
+        // Deleting a list goes the same way when only the list itself is refused.
+        const qint64 listId = store.reminder(id)->listId;
+        Section section;
+        section.listId = listId;
+        section.name = "Later";
+        const qint64 sectionId = store.put(section);
+        store.clearUndo();
+        tamper(path, "DROP TRIGGER refuse");
+        tamper(path, "CREATE TRIGGER refuse BEFORE DELETE ON lists BEGIN SELECT RAISE(ABORT, 'disk is full'); END");
+        store.removeList(listId);
+        QVERIFY(store.list(listId));
+        QVERIFY(store.section(sectionId));
+        QVERIFY(store.reminder(id));
+        QVERIFY(!store.canUndo());
+        Store again(path);
+        QVERIFY(again.list(listId) && again.section(sectionId) && again.reminder(id));
+    }
+
+    void aWriteThatFailsTakesItsWholeStepBack() {
+        // SQLite refuses the second of three writes; with ROLLBACK it ends
+        // the transaction as well, as it can when the disk is full.
+        for (const QString &resolution : {QString("ABORT"), QString("ROLLBACK")}) {
+            QTemporaryDir dir;
+            const QString path = dir.filePath("nudge.db");
+            Store store(path);
+            const qint64 listId = addList(store, "Home");
+            const QVector<qint64> ids{add(store, listId, "One"), add(store, listId, "Two"), add(store, listId, "Three")};
+            store.clearUndo();
+            tamper(path, QString("CREATE TRIGGER refuse BEFORE INSERT ON reminders WHEN NEW.title = 'Two!' "
+                                 "BEGIN SELECT RAISE(%1, 'disk is full'); END")
+                             .arg(resolution));
+            QSignalSpy failed(&store, &Store::failed);
+            {
+                Store::Tx tx(&store);
+                for (const qint64 id : ids) {
+                    Reminder r = *store.reminder(id);
+                    r.title += "!";
+                    store.put(r);
+                }
+            }
+            QCOMPARE(failed.count(), 1);
+            QVERIFY(!store.canUndo());
+            Store again(path);
+            for (const Store *seen : {&store, &again}) {
+                QCOMPARE(seen->reminder(ids[0])->title, QString("One"));
+                QCOMPARE(seen->reminder(ids[1])->title, QString("Two"));
+                QCOMPARE(seen->reminder(ids[2])->title, QString("Three"));
+            }
+            // On its own, a write that fails says so by returning zero.
+            Reminder r = *store.reminder(ids[1]);
+            r.title = "Two!";
+            QCOMPARE(store.put(r), 0);
+            QCOMPARE(store.reminder(ids[1])->title, QString("Two"));
+        }
+    }
+
+    void anUndoThatFailsKeepsItsStep() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        const qint64 id = add(store, addList(store, "Home"), "Milk");
+        retitle(store, id, "Oat milk");
+        tamper(path, "CREATE TRIGGER refuse BEFORE INSERT ON reminders WHEN NEW.title = 'Milk' "
+                     "BEGIN SELECT RAISE(ABORT, 'disk is full'); END");
+        QSignalSpy failed(&store, &Store::failed);
+        store.undo();
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(store.reminder(id)->title, QString("Oat milk"));
+        QVERIFY(store.canUndo());
+        QVERIFY(!store.canRedo());
+        tamper(path, "DROP TRIGGER refuse");
+        store.undo();
+        QVERIFY(store.reminder(id));
+        QCOMPARE(store.reminder(id)->title, QString("Milk"));
+    }
+
+    void editingAfterUndoOrRedoStartsANewStep() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        const qint64 listId = addList(store, "Home");
+        const qint64 id = add(store, listId, "Milk");
+        auto note = [&store, id](const QString &notes) {
+            Store::Tx tx(&store, "notes:1");
+            Reminder r = *store.reminder(id);
+            r.notes = notes;
+            store.put(r);
+        };
+        note("Soy");
+        retitle(store, id, "Soy milk", "title:1");
+        store.undo(); // the title, which leaves the notes on top
+        note("Soy, unsweetened");
+        store.undo();
+        QCOMPARE(store.reminder(id)->notes, QString("Soy"));
+
+        store.redo();
+        note("Soy, unsweetened, cold");
+        store.undo();
+        QCOMPARE(store.reminder(id)->notes, QString("Soy, unsweetened"));
+
+        // The same when another process's edit takes away the step on top.
+        const qint64 eggs = add(store, listId, "Eggs");
+        note("Soy, warm");
+        retitle(store, eggs, "Brown eggs", "title:2");
+        Store commandLine(store.path());
+        retitle(commandLine, eggs, "Free-range eggs");
+        QVERIFY(store.reloadIfChanged());
+        note("Soy, warm, frothed");
+        store.undo();
+        QCOMPARE(store.reminder(id)->notes, QString("Soy, warm"));
+    }
+
+    void undoAndRedoDoNotAnnounceAMomentAgain() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const QDateTime ten(QDate(2030, 5, 1), QTime(10, 0));
+        const qint64 id = add(store, addList(store, "Home"), "Stretch", ten.date(), 9 * 60);
+        Reminder r = *store.reminder(id);
+        r.dueMinutes = 10 * 60;
+        store.put(r);
+        notifier.check(ten);
+        QCOMPARE(alerts.sent.size(), 1);
+
+        // Back to nine and on to ten again: ten has been announced already.
+        store.undo();
+        QCOMPARE(store.reminder(id)->dueMinutes, 9 * 60);
+        store.redo();
+        QCOMPARE(store.reminder(id)->dueMinutes, 10 * 60);
+        notifier.check(ten.addSecs(60));
+        QCOMPARE(alerts.sent.size(), 1);
+    }
+
+    void anUndoneReminderCountsAsJustEdited() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        qint64 id = 0;
+        {
+            Store store(path);
+            id = add(store, addList(store, "Home"), "Stretch");
+        }
+        tamper(path, "UPDATE reminders SET modified_at = 1");
+        Store store(path);
+        retitle(store, id, "Stretch the back");
+        const qint64 before = QDateTime::currentSecsSinceEpoch();
+        store.undo();
+        QCOMPARE(store.reminder(id)->title, QString("Stretch"));
+        QVERIFY(store.reminder(id)->modifiedAt >= before);
+
+        // A snooze that ran out while it was deleted is not announced late.
+        store.setAlerted(id, 0, 0, before - 60);
+        store.removeReminder(id);
+        store.undo();
+        QVERIFY(store.reminder(id));
+        QCOMPARE(store.reminder(id)->snoozeUntil, 0);
+    }
+
+    void anotherProcessCostsOnlyTheStepsItTouches() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path), commandLine(path);
+        const qint64 home = addList(window, "Home");
+        const qint64 milk = add(window, home, "Milk"), eggs = add(window, home, "Eggs", QDate(2030, 5, 1), 9 * 60);
+        retitle(window, milk, "Oat milk");
+        retitle(window, eggs, "Brown eggs");
+
+        // The background service announcing Eggs and snoozing it is no edit.
+        QVERIFY(commandLine.reloadIfChanged());
+        FakeAlerts alerts;
+        Notifier background(&commandLine, &alerts);
+        const QDateTime due(QDate(2030, 5, 1), QTime(9, 0));
+        background.check(due);
+        background.act(1, "hour", due);
+        QCOMPARE(alerts.sent.size(), 1);
+        QVERIFY(commandLine.reminder(eggs)->snoozeUntil > 0);
+        QVERIFY(!window.reloadIfChanged());
+        QVERIFY(window.canUndo());
+
+        // The command line renames Eggs and adds Bread to Home. What the
+        // window did to Milk can still be undone; what it did to Eggs, or
+        // making the list Bread is now in, cannot.
+        retitle(commandLine, eggs, "Free-range eggs");
+        const qint64 bread = add(commandLine, home, "Bread");
+        QVERIFY(window.reloadIfChanged());
+        QVERIFY(window.canUndo());
+        window.undo();
+        QCOMPARE(window.reminder(milk)->title, QString("Milk"));
+        window.undo();
+        QVERIFY(!window.reminder(milk));
+        QVERIFY(!window.canUndo());
+        QCOMPARE(window.reminder(eggs)->title, QString("Free-range eggs"));
+        QVERIFY(window.list(home));
+        QCOMPARE(window.reminder(bread)->listId, home);
+    }
+
+    void redoDoesNotDeleteWhatAnotherProcessFilledIn() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path), commandLine(path);
+        const qint64 home = addList(window, "Home"), work = addList(window, "Work");
+        const qint64 milk = add(window, home, "Milk");
+        window.removeList(work);
+        window.undo(); // Work is back, and deleting it waits to be redone
+        QVERIFY(commandLine.reloadIfChanged());
+        const qint64 report = add(commandLine, work, "Send the report");
+        QVERIFY(window.reloadIfChanged());
+        QVERIFY(!window.canRedo());
+        window.undo();
+        QVERIFY(!window.reminder(milk));
+        QVERIFY(window.list(work));
+        QCOMPARE(window.reminder(report)->listId, work);
+    }
+
+    void undoNeverWritesOverAnotherProcess() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path), commandLine(path);
+        const qint64 home = addList(window, "Home");
+        const qint64 milk = add(window, home, "Milk"), eggs = add(window, home, "Eggs");
+        retitle(window, milk, "Oat milk");
+        retitle(window, eggs, "Brown eggs");
+        window.undo(); // Eggs waits to be redone
+
+        // The command line edits both before the window has caught up.
+        QVERIFY(commandLine.reloadIfChanged());
+        for (const qint64 id : {milk, eggs}) {
+            Reminder theirs = *commandLine.reminder(id);
+            theirs.notes = "From the command line";
+            commandLine.put(theirs);
+        }
+        window.undo();
+        window.redo();
+        QVERIFY(!window.canUndo());
+        QVERIFY(!window.canRedo());
+        Store again(path);
+        for (const Store *seen : {&window, &again}) {
+            QCOMPARE(seen->reminder(milk)->title, QString("Oat milk"));
+            QCOMPARE(seen->reminder(milk)->notes, QString("From the command line"));
+            QCOMPARE(seen->reminder(eggs)->title, QString("Eggs"));
+            QCOMPARE(seen->reminder(eggs)->notes, QString("From the command line"));
+        }
+    }
+
+    void aTimedRepeatDoneLateMovesPastToday() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        const qint64 listId = addList(store, "Home");
+        auto weekly = [&](const QString &title, int minutes) {
+            Reminder r;
+            r.listId = listId;
+            r.title = title;
+            r.due = QDate(2026, 11, 6); // a week overdue
+            r.dueMinutes = minutes;
+            r.repeat = "weekly:1";
+            return store.put(r);
+        };
+        // Done at ten on Friday: nine has gone by today, three has not.
+        QCOMPARE(store.complete(weekly("Water the plants", 9 * 60), friday), QDate(2026, 11, 20));
+        QCOMPARE(store.complete(weekly("Take out the bins", 15 * 60), friday), friday.date());
+        QCOMPARE(store.complete(weekly("Call home", -1), friday), friday.date());
+
+        const Repeat daily = Repeat::parse("daily:1");
+        QCOMPARE(daily.upcoming(QDate(2026, 10, 1), 10 * 60, friday), QDate(2026, 11, 14)); // ten is not ahead
+        QCOMPARE(daily.upcoming(QDate(2026, 10, 1), 10 * 60 + 1, friday), friday.date());
+        QCOMPARE(daily.upcoming(QDate(2026, 10, 1), -1, friday), friday.date());
+        QVERIFY(!daily.upcoming(QDate(2026, 11, 12), 9 * 60, friday, friday.date()).isValid());
+    }
+
+    void anOpenSubtaskReopensItsParent() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        const qint64 listId = addList(store, "Home");
+        const qint64 trip = add(store, listId, "Trip");
+        store.complete(trip, friday);
+        Reminder cabin;
+        cabin.listId = listId;
+        cabin.parentId = trip;
+        cabin.title = "Book the cabin";
+        const qint64 cabinId = store.put(cabin);
+        QVERIFY(cabinId > 0);
+        QVERIFY(!store.reminder(trip)->completed);
+        // Adding it and reopening the trip are one step.
+        store.undo();
+        QVERIFY(!store.reminder(cabinId));
+        QVERIFY(store.reminder(trip)->completed);
+        store.redo();
+        QVERIFY(store.reminder(cabinId));
+        QVERIFY(!store.reminder(trip)->completed);
+    }
+
+    void openingRepairsAParentDoneBeforeItsSubtasks() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        qint64 trip = 0, cabin = 0;
+        {
+            Store store(path);
+            const qint64 listId = addList(store, "Home");
+            trip = add(store, listId, "Trip");
+            Reminder child;
+            child.listId = listId;
+            child.parentId = trip;
+            child.title = "Book the cabin";
+            cabin = store.put(child);
+        }
+        // As Nudge 0.1.0 could leave it.
+        tamper(path, QString("UPDATE reminders SET completed = 1, completed_at = 1 WHERE id = %1").arg(trip));
+        Store store(path);
+        QVERIFY(!store.reminder(trip)->completed);
+        QVERIFY(!store.reminder(cabin)->completed);
+        QVERIFY(!store.canUndo());
+        Store again(path);
+        QVERIFY(!again.reminder(trip)->completed);
+    }
+
     // ---- Views -------------------------------------------------------------------
 
     void aListShowsSectionsAndSubtasks() {

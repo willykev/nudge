@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDate>
+#include <QDateTime>
 #include <QString>
 
 // How a reminder repeats, as stored on it: "" (never), "daily:N", "weekdays",
@@ -24,4 +25,8 @@ struct Repeat {
     // The occurrence after `due` that is not already in the past, or an
     // invalid date once the series has run beyond `end`.
     QDate upcoming(const QDate &due, const QDate &today, const QDate &end = {}) const;
+
+    // The same for a reminder at `minutes` past midnight (-1 for all day):
+    // once that time has gone by today, the next one is on a later day.
+    QDate upcoming(const QDate &due, int minutes, const QDateTime &now, const QDate &end = {}) const;
 };

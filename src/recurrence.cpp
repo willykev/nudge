@@ -73,3 +73,8 @@ QDate Repeat::upcoming(const QDate &due, const QDate &today, const QDate &end) c
         return {};
     return next;
 }
+
+QDate Repeat::upcoming(const QDate &due, int minutes, const QDateTime &now, const QDate &end) const {
+    const bool gone = minutes >= 0 && QDateTime(now.date(), QTime(minutes / 60, minutes % 60)) <= now;
+    return upcoming(due, gone ? now.date().addDays(1) : now.date(), end);
+}
