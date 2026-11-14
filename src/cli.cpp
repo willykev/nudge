@@ -18,6 +18,8 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
+#include <QStandardPaths>
 #include <algorithm>
 #include <cstdio>
 #include <functional>
@@ -26,7 +28,24 @@ namespace {
 
 const QStringList priorities{"none", "low", "medium", "high"};
 
-void print(FILE *stream, const QString &text) { fprintf(stream, "%s\n", qPrintable(text)); }
+// What is stored can come from an import or another program, so anything in
+// it that could steer the terminal (escape sequences, carriage returns, C1
+// and bidi controls, line separators) prints as a replacement character.
+// JSON escapes these itself.
+QString printable(QString text) {
+    for (QChar &c : text) {
+        const char16_t u = c.unicode();
+        if ((u < 0x20 && u != '\n' && u != '\t') || (u >= 0x7f && u <= 0x9f) || u == 0x2028 || u == 0x2029 ||
+            (u >= 0x202a && u <= 0x202e) || (u >= 0x2066 && u <= 0x2069))
+            c = QChar::ReplacementCharacter;
+    }
+    return text;
+}
+
+// A title or a name prints on one line, whatever line breaks it holds.
+QString oneLine(QString text) { return text.replace('\r', "\\r").replace('\n', "\\n"); }
+
+void print(FILE *stream, const QString &text) { fprintf(stream, "%s\n", qPrintable(printable(text))); }
 void print(const QJsonObject &object) { fprintf(stdout, "%s", QJsonDocument(object).toJson().constData()); }
 int fail(const QString &message) {
     print(stderr, message);
@@ -62,7 +81,7 @@ const TaskList *listNamed(const Store &store, const QString &name) {
 QString listNames(const Store &store) {
     QStringList names;
     for (const TaskList &list : store.lists())
-        names << list.name;
+        names << oneLine(list.name);
     return names.isEmpty() ? QString("There are no lists yet.") : "Lists: " + names.join(", ");
 }
 
@@ -112,32 +131,67 @@ QString toText(const Store &store, const Reminder &r) {
         parts << "flagged";
     for (const QString &tag : r.tags)
         parts << "#" + tag;
-    return parts.join("  ");
+    return oneLine(parts.join("  "));
 }
 
-// "daily", "weekly", "every 2 weeks" as a rule, or the rule itself.
-bool readRepeat(const QString &text, const QDate &due, QString *rule) {
+// A monthly or yearly reminder keeps returning to the day it is set for.
+void anchor(Reminder &r) {
+    Repeat repeat = Repeat::parse(r.repeat);
+    if (repeat.unit != Repeat::Monthly && repeat.unit != Repeat::Yearly)
+        return;
+    repeat.anchorDay = r.due.day();
+    r.repeat = repeat.toString();
+}
+
+// "daily", "weekly", "every 2 weeks", "every monday" as a rule, or the rule
+// itself. A repeat needs a date, the one it has or today, and a rule that
+// names a day moves it to the next such day, as quick entry does, so "every
+// monday" falls on Mondays.
+bool readRepeat(const QString &text, const QDate &today, Reminder &r) {
     const QString word = text.trimmed().toLower();
     if (word == "none" || word == "never") {
-        rule->clear();
+        r.repeat.clear();
+        r.repeatEnd = QDate();
         return true;
     }
+    QDate date = r.due.isValid() ? r.due : today;
     Repeat repeat = Repeat::parse(word.contains(':') ? word : word + ":1");
     if (!repeat.repeats()) {
-        const QuickEntry entry = Dates::parseQuick("x " + word, QDateTime(due.isValid() ? due : QDate::currentDate(), QTime(0, 0)));
+        const QuickEntry entry = Dates::parseQuick("x " + word, QDateTime(date, QTime(0, 0)));
         repeat = Repeat::parse(entry.repeat);
+        if (entry.due.isValid())
+            date = entry.due;
     }
     if (!repeat.repeats())
         return false;
-    if (repeat.unit == Repeat::Monthly || repeat.unit == Repeat::Yearly)
-        repeat.anchorDay = due.isValid() ? due.day() : QDate::currentDate().day();
-    *rule = repeat.toString();
+    if (repeat.unit == Repeat::Weekdays)
+        while (date.dayOfWeek() > 5)
+            date = date.addDays(1);
+    r.due = date;
+    r.repeat = repeat.toString();
+    anchor(r);
     return true;
 }
 
-// The options add and edit share. Returns an error, or nothing.
+// Tags as the window reads them: words apart by spaces or commas, without
+// their #. The store keeps tags apart by spaces, so no tag can hold one.
+QStringList readTags(const QString &text) {
+    static const QRegularExpression separator("[\\s,]+");
+    QStringList tags;
+    for (QString tag : text.split(separator, Qt::SkipEmptyParts)) {
+        while (tag.startsWith('#'))
+            tag.remove(0, 1);
+        if (!tag.isEmpty() && !tags.contains(tag, Qt::CaseInsensitive))
+            tags << tag;
+    }
+    return tags;
+}
+
+// The options add and edit share, by the rules the window keeps. Returns an
+// error, or nothing.
 QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r) {
-    const QDate today = QDate::currentDate();
+    const QDateTime now = QDateTime::currentDateTime();
+    const QDate today = now.date();
     if (parser.isSet("list")) {
         const TaskList *list = listNamed(store, parser.value("list"));
         if (!list)
@@ -156,14 +210,18 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
     if (parser.isSet("due")) {
         const QString text = parser.value("due");
         if (text == "none") {
+            // Without a date there is nothing to repeat or to alert ahead of.
             r.due = QDate();
             r.dueMinutes = -1;
             r.repeat.clear();
+            r.repeatEnd = QDate();
+            r.early = 0;
         } else {
             const QDate date = Dates::parseDate(text, today);
             if (!date.isValid())
                 return QString("Could not read %1 as a date. Try 2026-12-24, tomorrow, or \"next friday\".").arg(text);
             r.due = date;
+            anchor(r);
         }
     }
     if (parser.isSet("time")) {
@@ -175,18 +233,15 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
             if (minutes < 0)
                 return QString("Could not read %1 as a time. Try 17:30 or 5pm.").arg(text);
             r.dueMinutes = minutes;
+            // A time needs a day: the next one the clock shows that time on.
             if (!r.due.isValid())
-                r.due = today;
+                r.due = minutes > now.time().hour() * 60 + now.time().minute() ? today : today.addDays(1);
         }
     }
-    if (parser.isSet("repeat")) {
-        if (!readRepeat(parser.value("repeat"), r.due, &r.repeat))
-            return QString("Could not read %1 as a repeat. Try daily, weekdays, weekly, monthly, yearly, "
-                           "\"every 2 weeks\", or none.")
-                .arg(parser.value("repeat"));
-        if (!r.repeat.isEmpty() && !r.due.isValid())
-            r.due = today;
-    }
+    if (parser.isSet("repeat") && !readRepeat(parser.value("repeat"), today, r))
+        return QString("Could not read %1 as a repeat. Try daily, weekdays, weekly, monthly, yearly, "
+                       "\"every 2 weeks\", or none.")
+            .arg(parser.value("repeat"));
     if (parser.isSet("priority")) {
         const int priority = priorities.indexOf(parser.value("priority").toLower());
         if (priority < 0)
@@ -195,14 +250,9 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
     }
     if (parser.isSet("flag"))
         r.flagged = true;
-    if (parser.isSet("unflag"))
-        r.flagged = false;
-    for (QString tag : parser.values("tag")) {
-        while (tag.startsWith('#'))
-            tag.remove(0, 1);
-        if (!tag.isEmpty() && !r.tags.contains(tag, Qt::CaseInsensitive))
+    for (const QString &tag : readTags(parser.values("tag").join(' ')))
+        if (!r.tags.contains(tag, Qt::CaseInsensitive))
             r.tags << tag;
-    }
     return {};
 }
 
@@ -225,7 +275,7 @@ int report(const Command &command, const Store &store, qint64 id, const QString 
     if (command.wantsJson())
         print(toJson(store, *r));
     else
-        print(stdout, QString("%1 %2: %3").arg(verb).arg(id).arg(r->title));
+        print(stdout, QString("%1 %2: %3").arg(verb, QString::number(id), oneLine(r->title)));
     return 0;
 }
 
@@ -270,13 +320,30 @@ int add(const QStringList &arguments) {
         r.sectionId = parent->sectionId;
         r.position = store.endPosition(r.listId);
     }
-    const qint64 listId = r.listId;
+    // Read before the options, which let go of the parent when --list names
+    // another list: a subtask lives in its parent's list.
+    const qint64 parentId = r.parentId, listId = r.listId;
     const QString error = applyOptions(command.parser, store, r);
     if (!error.isEmpty())
         return fail(error);
-    if (r.parentId && r.listId != listId)
+    if (parentId && r.listId != listId)
         return fail("A subtask lives in its parent's list; leave out --list.");
-    return report(command, store, store.put(r), "Added");
+
+    // A done reminder has no open subtasks, so adding one reopens it.
+    const Reminder *parent = store.reminder(parentId);
+    const bool reopen = parent && parent->completed;
+    qint64 id = 0;
+    {
+        Store::Tx tx(&store);
+        if (reopen)
+            store.reopen(parentId);
+        id = store.put(r);
+    }
+    const int result = report(command, store, id, "Added");
+    if (result == 0 && reopen && !command.wantsJson())
+        print(stdout, QString("Reopened %1: %2, which has something to do again")
+                          .arg(QString::number(parentId), oneLine(store.reminder(parentId)->title)));
+    return result;
 }
 
 int edit(const QStringList &arguments) {
@@ -285,7 +352,7 @@ int edit(const QStringList &arguments) {
     command.parser.addOption({"title", "A new title", "text"});
     addEditOptions(command.parser);
     command.parser.addOption({"unflag", "Take the flag off"});
-    command.parser.addOption({"tags", "Replace the tags with these, separated by spaces", "tags"});
+    command.parser.addOption({"tags", "Replace the tags with these, separated by spaces or commas", "tags"});
     command.json();
     command.parser.process(arguments);
 
@@ -303,19 +370,15 @@ int edit(const QStringList &arguments) {
             return fail("A reminder needs a title.");
         r.title = command.parser.value("title").simplified();
     }
-    if (command.parser.isSet("tags")) {
-        r.tags.clear();
-        for (QString tag : command.parser.value("tags").split(' ', Qt::SkipEmptyParts)) {
-            while (tag.startsWith('#'))
-                tag.remove(0, 1);
-            if (!tag.isEmpty() && !r.tags.contains(tag, Qt::CaseInsensitive))
-                r.tags << tag;
-        }
-    }
+    if (command.parser.isSet("tags"))
+        r.tags = readTags(command.parser.value("tags"));
     const qint64 listId = r.listId;
     const QString error = applyOptions(command.parser, store, r);
     if (!error.isEmpty())
         return fail(error);
+    // Only edit has --unflag; add has nothing to take off.
+    if (command.parser.isSet("unflag"))
+        r.flagged = false;
 
     Store::Tx tx(&store);
     if (r.listId != listId) {
@@ -332,7 +395,8 @@ int edit(const QStringList &arguments) {
 }
 
 // done, reopen, and delete all take one or more ids, and do nothing unless
-// every one of them exists.
+// every one of them exists. An id named twice is acted on once: done twice
+// would skip a repeating reminder's next date.
 int each(const QStringList &arguments, const QString &name, const QString &description, const QString &verb,
          const std::function<void(Store &, qint64)> &action) {
     Command command(name, description);
@@ -350,7 +414,8 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
         const qint64 id = word.toLongLong();
         if (!store.reminder(id))
             return fail("There is no reminder " + word + ". Nothing was changed.");
-        ids << id;
+        if (!ids.contains(id))
+            ids << id;
     }
     QJsonArray changed;
     QStringList lines;
@@ -358,7 +423,7 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
         Store::Tx tx(&store);
         for (qint64 id : ids) {
             const QString title = store.reminder(id) ? store.reminder(id)->title : QString();
-            lines << QString("%1 %2: %3").arg(verb).arg(id).arg(title);
+            lines << QString("%1 %2: %3").arg(verb, QString::number(id), oneLine(title));
             action(store, id);
             if (const Reminder *r = store.reminder(id))
                 changed << toJson(store, *r);
@@ -397,9 +462,9 @@ int show(const QStringList &arguments) {
     }
     print(stdout, toText(store, *r));
     if (!r->notes.isEmpty())
-        print(stdout, "       " + QString(r->notes).replace('\n', "\n       "));
+        print(stdout, "       " + QString(r->notes).replace("\r\n", "\n").replace('\n', "\n       "));
     if (!r->url.isEmpty())
-        print(stdout, "       " + r->url);
+        print(stdout, "       " + oneLine(r->url));
     for (qint64 childId : store.childrenOf(r->id))
         print(stdout, toText(store, *store.reminder(childId)));
     return 0;
@@ -500,13 +565,14 @@ int lists(const QStringList &arguments) {
             return fail(QString("No list named %1. %2").arg(name, listNames(store)));
         const int holding = count(doomed->id, false);
         if (holding && !command.parser.isSet("force"))
-            return fail(QString("%1 holds %2 reminders. Add --force to delete them with it.").arg(doomed->name).arg(holding));
+            return fail(QString("%1 holds %2 reminders. Add --force to delete them with it.")
+                            .arg(oneLine(doomed->name), QString::number(holding)));
         const QString removed = doomed->name;
         store.removeList(doomed->id);
         if (command.wantsJson())
             print({{"deleted", removed}, {"reminders", holding}});
         else
-            print(stdout, "Deleted the list " + removed);
+            print(stdout, "Deleted the list " + oneLine(removed));
         return 0;
     }
     if (!action.isEmpty())
@@ -518,7 +584,7 @@ int lists(const QStringList &arguments) {
         all << QJsonObject{{"id", entry.id}, {"name", entry.name}, {"color", entry.color}, {"open", openCount},
                            {"total", count(entry.id, false)}};
         if (!command.wantsJson())
-            print(stdout, QString("%1  %2").arg(openCount, 4).arg(entry.name));
+            print(stdout, QString("%1  %2").arg(openCount, 4).arg(oneLine(entry.name)));
     }
     if (command.wantsJson())
         print({{"lists", all}});
@@ -528,6 +594,7 @@ int lists(const QStringList &arguments) {
 int exportAll(const QStringList &arguments) {
     Command command("export", "Write every list and reminder as JSON, to a file or to standard output.");
     command.parser.addPositionalArgument("file", "Where to write", "[file]");
+    command.json();
     command.parser.process(arguments);
     Store store;
     if (!ready(store))
@@ -555,6 +622,7 @@ int exportAll(const QStringList &arguments) {
                                {"lists", lists},
                                {"reminders", reminders}};
     const QString path = command.arguments().value(0);
+    // To standard output it is JSON, whether --json says so or not.
     if (path.isEmpty()) {
         print(document);
         return 0;
@@ -564,7 +632,10 @@ int exportAll(const QStringList &arguments) {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(QJsonDocument(document).toJson()) < 0 || !file.commit())
         return fail("Could not write " + path + ": " + file.errorString());
-    print(stdout, QString("Exported %1 reminders to %2").arg(reminders.size()).arg(path));
+    if (command.wantsJson())
+        print({{"exported", int(reminders.size())}, {"file", QFileInfo(path).absoluteFilePath()}});
+    else
+        print(stdout, QString("Exported %1 reminders to %2").arg(reminders.size()).arg(path));
     return 0;
 }
 
@@ -598,6 +669,9 @@ int importAll(const QStringList &arguments) {
         section.position = store.sections().isEmpty() ? 1 : store.sections().last().position + 1;
         return store.put(section);
     };
+    // The lists the import makes, the only ones it may give the file's color
+    // and order: nothing already here is changed.
+    QSet<qint64> made;
     auto listFor = [&](const QString &name) -> qint64 {
         if (name.isEmpty())
             return store.defaultListId();
@@ -607,17 +681,21 @@ int importAll(const QStringList &arguments) {
         created.name = name;
         created.color = "blue";
         created.position = store.lists().isEmpty() ? 1 : store.lists().last().position + 1;
-        return store.put(created);
+        const qint64 id = store.put(created);
+        made.insert(id);
+        return id;
     };
     for (const QJsonValue &value : document.value("lists").toArray()) {
         const QJsonObject entry = value.toObject();
         const qint64 listId = listFor(entry.value("name").toString());
-        TaskList updated = *store.list(listId);
-        if (!entry.value("color").toString().isEmpty())
-            updated.color = entry.value("color").toString();
-        if (!entry.value("sort").toString().isEmpty())
-            updated.sort = entry.value("sort").toString();
-        store.put(updated);
+        if (const TaskList *list = store.list(listId); list && made.contains(listId)) {
+            TaskList updated = *list;
+            if (!entry.value("color").toString().isEmpty())
+                updated.color = entry.value("color").toString();
+            if (!entry.value("sort").toString().isEmpty())
+                updated.sort = entry.value("sort").toString();
+            store.put(updated);
+        }
         for (const QJsonValue &section : entry.value("sections").toArray())
             sectionIn(listId, section.toString());
     }
@@ -656,6 +734,10 @@ int importAll(const QStringList &arguments) {
             if (r.createdAt < 0)
                 r.createdAt = 0;
             r.position = store.endPosition(r.listId);
+            // A done reminder has no open subtasks, so an open one reopens
+            // the parent it came with.
+            if (const Reminder *parent = store.reminder(r.parentId); !r.completed && parent && parent->completed)
+                store.reopen(r.parentId);
             const qint64 id = store.put(r);
             newIds.insert(entry.value("id").toInteger(), id);
             added += id != 0;
@@ -704,6 +786,7 @@ int skill(const QStringList &arguments) {
     Command command("skill", "Print the agent skill, or install it for your coding agents with: skill install.");
     command.parser.addPositionalArgument("install", "Copy to ~/.agents/skills/nudge and link into ~/.claude/skills",
                                          "[install]");
+    command.json();
     command.parser.process(arguments);
     QFile bundled(":/skill.md");
     if (!bundled.open(QIODevice::ReadOnly))
@@ -711,7 +794,10 @@ int skill(const QStringList &arguments) {
     const QByteArray text = bundled.readAll();
     const QString action = command.arguments().value(0);
     if (action.isEmpty()) {
-        fputs(text.constData(), stdout);
+        if (command.wantsJson())
+            print({{"skill", QString::fromUtf8(text)}});
+        else
+            fputs(text.constData(), stdout);
         return 0;
     }
     if (action != "install")
@@ -721,18 +807,24 @@ int skill(const QStringList &arguments) {
     QSaveFile file(directory + "/SKILL.md");
     if (!QDir().mkpath(directory) || !file.open(QIODevice::WriteOnly) || file.write(text) < 0 || !file.commit())
         return fail("Could not write " + file.fileName());
-    print(stdout, "Installed " + file.fileName());
-    if (!home.exists(".claude"))
-        return 0;
-    const QString link = home.filePath(".claude/skills/nudge");
-    const QFileInfo existing(link);
-    if (existing.isSymLink())
-        QFile::remove(link);
-    else if (existing.exists())
-        return fail(link + " exists and is not a link; leaving it alone.");
-    if (!home.mkpath(".claude/skills") || !QFile::link("../../.agents/skills/nudge", link))
-        return fail("Could not link " + link);
-    print(stdout, "Linked " + link);
+    if (!command.wantsJson())
+        print(stdout, "Installed " + file.fileName());
+    QJsonValue linked; // stays null without Claude Code
+    if (home.exists(".claude")) {
+        const QString link = home.filePath(".claude/skills/nudge");
+        const QFileInfo existing(link);
+        if (existing.isSymLink())
+            QFile::remove(link);
+        else if (existing.exists())
+            return fail(link + " exists and is not a link; leaving it alone.");
+        if (!home.mkpath(".claude/skills") || !QFile::link("../../.agents/skills/nudge", link))
+            return fail("Could not link " + link);
+        if (!command.wantsJson())
+            print(stdout, "Linked " + link);
+        linked = link;
+    }
+    if (command.wantsJson())
+        print({{"installed", file.fileName()}, {"linked", linked}});
     return 0;
 }
 
@@ -803,7 +895,13 @@ int runCli(const QStringList &arguments) {
     return help(arguments);
 }
 
-int runDaemon() {
+WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun) {
+    if (systemdRun.isEmpty())
+        return {nudge, {"open"}, session};
+    return {systemdRun, {"--user", "--scope", "--collect", "--quiet", nudge, "open"}, session};
+}
+
+int runDaemon(const QProcessEnvironment &session) {
     Store store;
     if (!ready(store))
         return 1;
@@ -816,9 +914,16 @@ int runDaemon() {
         notifier.act(id, action, QDateTime::currentDateTime());
     });
     // Clicking an alert brings up the window: the one already open, or a new one.
-    QObject::connect(&notifier, &Notifier::opened, &notifier, [] {
-        if (!focusNudgeWindow())
-            QProcess::startDetached(QCoreApplication::applicationFilePath(), {"open"});
+    QObject::connect(&notifier, &Notifier::opened, &notifier, [session] {
+        if (focusNudgeWindow())
+            return;
+        const WindowLaunch launch = windowLaunch(QCoreApplication::applicationFilePath(), session,
+                                                 QStandardPaths::findExecutable("systemd-run"));
+        QProcess process;
+        process.setProgram(launch.program);
+        process.setArguments(launch.arguments);
+        process.setProcessEnvironment(launch.environment);
+        process.startDetached();
     });
     notifier.start();
     return QCoreApplication::exec();

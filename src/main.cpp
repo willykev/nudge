@@ -5,6 +5,7 @@
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QProcessEnvironment>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -22,6 +23,10 @@
 #include "translator.h"
 
 int main(int argc, char *argv[]) {
+    // The environment as the session gave it, before Nudge sets its own
+    // below: a window the background service opens gets this one back.
+    const QProcessEnvironment session = QProcessEnvironment::systemEnvironment();
+
     // Nudge follows the Omarchy theme itself; Qt's gtk3 platform theme would
     // only fight it.
     qputenv("QT_QPA_PLATFORMTHEME", "generic");
@@ -69,7 +74,7 @@ int main(int argc, char *argv[]) {
     app.installTranslator(&translator);
 
     if (daemon)
-        return runDaemon();
+        return runDaemon(session);
 
     QCommandLineParser args;
     args.setApplicationDescription("Reminders for the Omarchy desktop.\n\n" + cliSummary());

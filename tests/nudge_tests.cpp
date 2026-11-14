@@ -11,9 +11,11 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <unistd.h>
 
 #include "alerts.h"
 #include "backend.h"
+#include "cli.h"
 #include "dates.h"
 #include "look.h"
 #include "recurrence.h"
@@ -1958,6 +1960,415 @@ private slots:
         QVERIFY(!backend.backgroundAsk());
         backend.setBackground(false);
         QVERIFY(!backend.backgroundOn());
+    }
+
+    // ---- cli (review fixes) ----
+
+private:
+    struct CliRun {
+        int code = -1;
+        QString out, err;
+        QStringList warnings;
+    };
+
+    // Runs `nudge <arguments>` on the file at `database`, as the command line
+    // would, and keeps what it printed and warned. NUDGE_DB is set only for
+    // the run, and nothing runs unless the store would open that file, so a
+    // command never reaches the real reminders.
+    static CliRun cliRun(const QString &database, const QStringList &arguments) {
+        CliRun ran;
+        const bool hadDatabase = qEnvironmentVariableIsSet("NUDGE_DB");
+        const QByteArray previous = qgetenv("NUDGE_DB");
+        qputenv("NUDGE_DB", QFile::encodeName(database));
+        QTemporaryFile out, err;
+        if (Store::defaultPath() == database && out.open() && err.open()) {
+            static QStringList *warnings = nullptr;
+            warnings = &ran.warnings;
+            const QtMessageHandler before = qInstallMessageHandler(
+                [](QtMsgType, const QMessageLogContext &, const QString &message) { *warnings << message; });
+            fflush(stdout);
+            fflush(stderr);
+            const int savedOut = ::dup(STDOUT_FILENO), savedErr = ::dup(STDERR_FILENO);
+            ::dup2(out.handle(), STDOUT_FILENO);
+            ::dup2(err.handle(), STDERR_FILENO);
+            ran.code = runCli(QStringList{"nudge"} + arguments);
+            fflush(stdout);
+            fflush(stderr);
+            ::dup2(savedOut, STDOUT_FILENO);
+            ::dup2(savedErr, STDERR_FILENO);
+            ::close(savedOut);
+            ::close(savedErr);
+            qInstallMessageHandler(before);
+            out.seek(0);
+            err.seek(0);
+            ran.out = QString::fromUtf8(out.readAll());
+            ran.err = QString::fromUtf8(err.readAll());
+        }
+        if (hadDatabase)
+            qputenv("NUDGE_DB", previous);
+        else
+            qunsetenv("NUDGE_DB");
+        return ran;
+    }
+
+    static QJsonObject cliJson(const CliRun &ran) { return QJsonDocument::fromJson(ran.out.toUtf8()).object(); }
+
+private slots:
+    void commandOutputCannotSteerTheTerminal() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        // An import or another program can leave anything in a field: here a
+        // clipboard write, a link, a title change, cursor moves, line breaks,
+        // and bidi and C1 controls.
+        const qint64 listId = addList(store, "Inbox\x1b]52;c;aGk=\x07\nEvil");
+        Reminder r;
+        r.listId = listId;
+        r.title = QString("Pay\x1b]8;;http://x\x07 rent\r\x1b[1A\x1b[2Kfake") + QChar(0x202e) + QChar(0x2066) +
+                  QChar(0x85) + QChar(0x9b) + QChar(0x7f) + QChar(0x2028);
+        r.notes = "line1\r\nline2\x1b]0;title\x07";
+        r.url = "https://example.com/\ninjected";
+        r.tags = {"home\x1b[31m"};
+        r.due = QDate(2030, 5, 1);
+        const qint64 id = store.put(r);
+        Reminder subtask;
+        subtask.listId = listId;
+        subtask.parentId = id;
+        subtask.title = "Sub\nline";
+        subtask.position = 1;
+        store.put(subtask);
+        const QString number = QString::number(id);
+
+        // The first character that could steer a terminal, by its number, so
+        // a failure does not send it to the terminal running the tests.
+        auto steering = [](const QString &text) {
+            static const QRegularExpression controls(
+                "[\\x{0}-\\x{8}\\x{b}-\\x{1f}\\x{7f}-\\x{9f}\\x{2028}\\x{2029}\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}]");
+            const QRegularExpressionMatch found = controls.match(text);
+            return found.hasMatch() ? QString("U+%1").arg(int(found.captured().at(0).unicode()), 4, 16, QChar('0'))
+                                    : QString();
+        };
+        auto lines = [](const QString &text) { return text.split('\n', Qt::SkipEmptyParts).size(); };
+
+        CliRun ran = cliRun(path, {"list", "all"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(steering(ran.out), QString());
+        QCOMPARE(lines(ran.out), 2); // a line a reminder, whatever its fields hold
+        QVERIFY(ran.out.contains("Sub\\nline"));
+        QVERIFY(ran.out.contains("rent\\r"));
+        QVERIFY(ran.out.contains(QChar::ReplacementCharacter));
+
+        ran = cliRun(path, {"show", number});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(steering(ran.out), QString());
+        QCOMPARE(lines(ran.out), 5); // the reminder, two lines of notes, the link, the subtask
+        QVERIFY(ran.out.contains("https://example.com/\\ninjected"));
+
+        ran = cliRun(path, {"lists"});
+        QCOMPARE(steering(ran.out), QString());
+        QCOMPARE(lines(ran.out), 1);
+
+        // An error that names the lists goes to stderr just as safely.
+        ran = cliRun(path, {"list", "--list", "Nowhere"});
+        QCOMPARE(ran.code, 1);
+        QCOMPARE(steering(ran.err), QString());
+        QCOMPARE(lines(ran.err), 1);
+
+        ran = cliRun(path, {"edit", number, "--priority", "high"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(steering(ran.out), QString());
+        QCOMPARE(lines(ran.out), 1);
+
+        ran = cliRun(path, {"done", number});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(steering(ran.out), QString());
+        QCOMPARE(lines(ran.out), 1);
+
+        // JSON escapes what a field holds and keeps all of it.
+        ran = cliRun(path, {"show", number, "--json"});
+        QCOMPARE(cliJson(ran).value("title").toString(), r.title);
+        QCOMPARE(cliJson(ran).value("url").toString(), r.url);
+    }
+
+    void commandTimesAndDatesFollowTheWindow() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        // A time without a day is the next time the clock shows it, and
+        // midnight has always just gone.
+        const QDate before = QDate::currentDate();
+        CliRun ran = cliRun(path, {"add", "Take pills", "--time", "00:00", "--json"});
+        const QDate after = QDate::currentDate();
+        QCOMPARE(ran.code, 0);
+        const QDate due = QDate::fromString(cliJson(ran).value("due").toString(), Qt::ISODate);
+        QVERIFY2(due > before && due <= after.addDays(1), qPrintable(due.toString(Qt::ISODate)));
+        QCOMPARE(cliJson(ran).value("time").toString(), QString("00:00"));
+
+        // A date says which day a monthly repeat returns to, as the window has it.
+        ran = cliRun(path, {"add", "Pay rent every month", "--due", "2030-01-31", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("repeat").toString(), QString("monthly:1:31"));
+        const QString rent = QString::number(cliJson(ran).value("id").toInteger());
+        ran = cliRun(path, {"edit", rent, "--due", "2030-03-15", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("due").toString(), QString("2030-03-15"));
+        QCOMPARE(cliJson(ran).value("repeat").toString(), QString("monthly:1:15"));
+    }
+
+    void commandRepeatsKeepTheirDay() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        // "every monday" moves a Wednesday to the Monday after it, as quick
+        // entry does, so the series falls on Mondays.
+        CliRun ran = cliRun(path, {"add", "Gym", "--due", "2030-05-01", "--repeat", "every monday", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("due").toString(), QString("2030-05-06"));
+        QCOMPARE(cliJson(ran).value("repeat").toString(), QString("weekly:1"));
+
+        // Without a date it starts on the coming Monday, today if it is one.
+        const QDate before = QDate::currentDate();
+        ran = cliRun(path, {"add", "Swim", "--repeat", "every other monday", "--json"});
+        const QDate after = QDate::currentDate();
+        QCOMPARE(ran.code, 0);
+        const QDate due = QDate::fromString(cliJson(ran).value("due").toString(), Qt::ISODate);
+        QCOMPARE(due.dayOfWeek(), 1);
+        QVERIFY2(due >= before && due <= after.addDays(6), qPrintable(due.toString(Qt::ISODate)));
+        QCOMPARE(cliJson(ran).value("repeat").toString(), QString("weekly:2"));
+
+        // A series on weekdays starts on one.
+        ran = cliRun(path, {"add", "Commute", "--due", "2030-05-04", "--repeat", "weekdays", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("due").toString(), QString("2030-05-06"));
+
+        // A repeat that names no day keeps the date it has.
+        ran = cliRun(path, {"add", "Bins", "--due", "2030-05-01", "--repeat", "every 2 weeks", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("due").toString(), QString("2030-05-01"));
+        QCOMPARE(cliJson(ran).value("repeat").toString(), QString("weekly:2"));
+    }
+
+    void clearingADateOrRepeatClearsWhereItEnds() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        Reminder r;
+        r.listId = addList(store, "Home");
+        r.title = "Water the plants";
+        r.due = QDate(2030, 5, 1);
+        r.dueMinutes = 9 * 60;
+        r.repeat = "weekly:1";
+        r.repeatEnd = QDate(2030, 6, 1);
+        r.early = 30;
+        const QString water = QString::number(store.put(r));
+        r.title = "Feed the cat";
+        const QString feed = QString::number(store.put(r));
+
+        // Without a repeat there is no end to it, or a later repeat would
+        // stop at the old one.
+        CliRun ran = cliRun(path, {"edit", water, "--repeat", "none", "--json"});
+        QCOMPARE(ran.code, 0);
+        QVERIFY(cliJson(ran).value("repeat").isNull());
+        QVERIFY(cliJson(ran).value("repeatEnd").isNull());
+        QCOMPARE(cliJson(ran).value("due").toString(), QString("2030-05-01"));
+
+        // Without a date there is nothing to repeat or to alert ahead of.
+        ran = cliRun(path, {"edit", feed, "--due", "none", "--json"});
+        QCOMPARE(ran.code, 0);
+        QVERIFY(cliJson(ran).value("due").isNull());
+        QVERIFY(cliJson(ran).value("time").isNull());
+        QVERIFY(cliJson(ran).value("repeat").isNull());
+        QVERIFY(cliJson(ran).value("repeatEnd").isNull());
+        QCOMPARE(cliJson(ran).value("early").toInt(), 0);
+    }
+
+    void commandTagsAreSingleWords() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        // The store keeps tags apart by spaces, so a tag cannot hold one.
+        CliRun ran = cliRun(path, {"add", "Clear the desk", "--tag", "home office", "--tag", "#work,", "--json"});
+        QCOMPARE(ran.code, 0);
+        const QStringList tags{"home", "office", "work"};
+        QCOMPARE(cliJson(ran).value("tags").toVariant().toStringList(), tags);
+        const qint64 id = cliJson(ran).value("id").toInteger();
+        // What was printed is what is read back.
+        QCOMPARE(Store(path).reminder(id)->tags, tags);
+
+        ran = cliRun(path, {"edit", QString::number(id), "--tags", "#a,b\tc  A", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("tags").toVariant().toStringList(), (QStringList{"a", "b", "c"}));
+        QCOMPARE(Store(path).reminder(id)->tags, (QStringList{"a", "b", "c"}));
+    }
+
+    void commandsActOnARepeatedIdOnce() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        Reminder r;
+        r.listId = addList(store, "Home");
+        r.title = "Stretch";
+        r.due = QDate(2030, 5, 1);
+        r.repeat = "daily:1";
+        const qint64 id = store.put(r);
+        const QString number = QString::number(id);
+
+        // Named twice, it is still done once: one day on, one completion.
+        CliRun ran = cliRun(path, {"done", number, number, "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("reminders").toArray().size(), 1);
+        Store check(path);
+        QCOMPARE(check.reminder(id)->due, QDate(2030, 5, 2));
+        QCOMPARE(check.reminders().size(), 2); // it, and the record of one completion
+
+        ran = cliRun(path, {"delete", number, number});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(ran.out, "Deleted " + number + ": Stretch\n");
+    }
+
+    void importingLeavesTheListsHereAlone() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        TaskList home;
+        home.name = "Home";
+        home.color = "green";
+        home.position = 1;
+        const qint64 homeId = store.put(home);
+        const QString file = dir.filePath("export.json");
+        write(file, R"({"nudge": 1, "reminders": [], "lists": [
+            {"name": "home", "color": "red", "sort": "due", "sections": []},
+            {"name": "Garden", "color": "cyan", "sort": "title", "sections": ["Beds"]}]})");
+
+        const CliRun ran = cliRun(path, {"import", file});
+        QCOMPARE(ran.code, 0);
+        Store check(path);
+        QCOMPARE(check.list(homeId)->color, QString("green"));
+        QCOMPARE(check.list(homeId)->sort, QString("manual"));
+        // A list the import makes takes the look it had.
+        QCOMPARE(check.lists().size(), 2);
+        const TaskList garden = check.lists().last();
+        QCOMPARE(garden.name, QString("Garden"));
+        QCOMPARE(garden.color, QString("cyan"));
+        QCOMPARE(garden.sort, QString("title"));
+    }
+
+    void aSubtaskStaysInItsParentsList() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        const qint64 home = addList(store, "Home");
+        addList(store, "Work");
+        const QString parent = QString::number(add(store, home, "Plan the trip"));
+
+        CliRun ran = cliRun(path, {"add", "Book a cabin", "--parent", parent, "--list", "Work"});
+        QCOMPARE(ran.code, 1);
+        QCOMPARE(ran.err, QString("A subtask lives in its parent's list; leave out --list.\n"));
+        QCOMPARE(Store(path).reminders().size(), 1);
+
+        // Naming the parent's own list moves nothing, so it is fine.
+        ran = cliRun(path, {"add", "Book a cabin", "--parent", parent, "--list", "home", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(QString::number(cliJson(ran).value("parent").toInteger()), parent);
+        QCOMPARE(cliJson(ran).value("list").toString(), QString("Home"));
+    }
+
+    void exportAndSkillTakeJson() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        add(store, addList(store, "Home"), "Water the plants");
+
+        const QString file = dir.filePath("backup.json");
+        CliRun ran = cliRun(path, {"export", file, "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("exported").toInt(), 1);
+        QCOMPARE(cliJson(ran).value("file").toString(), QFileInfo(file).absoluteFilePath());
+        QVERIFY(QFile::exists(file));
+
+        // To standard output an export is JSON either way.
+        ran = cliRun(path, {"export", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("reminders").toArray().size(), 1);
+
+        ran = cliRun(path, {"skill", "--json"});
+        QCOMPARE(ran.code, 0);
+        QVERIFY(cliJson(ran).value("skill").toString().startsWith("---\nname: nudge\n"));
+    }
+
+    void addingAReminderWarnsOfNothing() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        CliRun ran = cliRun(path, {"add", "Water the plants", "--flag", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(ran.warnings, QStringList());
+        QVERIFY(cliJson(ran).value("flagged").toBool());
+
+        // Taking the flag off is edit's.
+        ran = cliRun(path, {"edit", QString::number(cliJson(ran).value("id").toInteger()), "--unflag", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(ran.warnings, QStringList());
+        QVERIFY(!cliJson(ran).value("flagged").toBool());
+    }
+
+    void namesWithPercentSignsPrintAsTheyAre() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        add(store, addList(store, "Save 50%2 now"), "Coupons");
+        const CliRun ran = cliRun(path, {"lists", "delete", "Save 50%2 now"});
+        QCOMPARE(ran.code, 1);
+        QCOMPARE(ran.err, QString("Save 50%2 now holds 1 reminders. Add --force to delete them with it.\n"));
+    }
+
+    void aSubtaskForADoneReminderReopensIt() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        const qint64 listId = addList(store, "Home");
+        const qint64 trip = add(store, listId, "Plan the trip");
+        store.complete(trip, QDateTime::currentDateTime());
+
+        // A done reminder has no open subtasks, so adding one reopens it,
+        // and says so, rather than hide the new one away.
+        CliRun ran = cliRun(path, {"add", "Book a cabin", "--parent", QString::number(trip)});
+        QCOMPARE(ran.code, 0);
+        QVERIFY2(ran.out.contains("Reopened " + QString::number(trip) + ": Plan the trip"), qPrintable(ran.out));
+        QVERIFY(!Store(path).reminder(trip)->completed);
+        ran = cliRun(path, {"list", "all"});
+        QCOMPARE(ran.out.split('\n', Qt::SkipEmptyParts).size(), 2);
+
+        // Nor can an import leave an open subtask under a done reminder.
+        const QString file = dir.filePath("export.json");
+        write(file, R"({"nudge": 1, "lists": [], "reminders": [
+            {"id": 1, "title": "Pack", "list": "Home", "completed": true, "completedAt": "2026-11-01T10:00:00"},
+            {"id": 2, "parent": 1, "title": "Buy rope", "list": "Home"}]})");
+        ran = cliRun(path, {"import", file});
+        QCOMPARE(ran.code, 0);
+        Store check(path);
+        for (const Reminder &r : check.reminders())
+            if (r.title == "Pack")
+                QVERIFY(!r.completed);
+        ran = cliRun(path, {"list", "all"});
+        QCOMPARE(ran.out.split('\n', Qt::SkipEmptyParts).size(), 4);
+    }
+
+    // Worked out only: nothing is started.
+    void aClickedBackgroundAlertOpensARealWindow() {
+        // The service draws offscreen, as these tests do; the window it opens
+        // gets the session's own environment back, which named no platform.
+        QProcessEnvironment session;
+        session.insert("WAYLAND_DISPLAY", "wayland-1");
+        const WindowLaunch scoped = windowLaunch("/usr/bin/nudge", session, "/usr/bin/systemd-run");
+        QCOMPARE(scoped.program, QString("/usr/bin/systemd-run"));
+        // A scope of its own, so turning the service off leaves the window open.
+        QCOMPARE(scoped.arguments, (QStringList{"--user", "--scope", "--collect", "--quiet", "/usr/bin/nudge", "open"}));
+        QVERIFY(scoped.environment == session);
+        QVERIFY(!scoped.environment.contains("QT_QPA_PLATFORM"));
+
+        // Without systemd-run it starts directly, still as the session had it.
+        session.insert("QT_QPA_PLATFORM", "wayland");
+        const WindowLaunch direct = windowLaunch("/usr/bin/nudge", session, QString());
+        QCOMPARE(direct.program, QString("/usr/bin/nudge"));
+        QCOMPARE(direct.arguments, QStringList{"open"});
+        QCOMPARE(direct.environment.value("QT_QPA_PLATFORM"), QString("wayland"));
     }
 
     // ---- Alerts -------------------------------------------------------------------
