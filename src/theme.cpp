@@ -10,8 +10,41 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <cmath>
+#include <utility>
 
-Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
+HyprlandReloads::HyprlandReloads(QObject *parent) : QObject(parent) {
+    connect(&m_socket, &QLocalSocket::readyRead, this, [this] {
+        while (m_socket.canReadLine())
+            if (m_socket.readLine().startsWith("configreloaded>>"))
+                emit reloaded();
+    });
+    // Hyprland lets go of a listener that falls far behind, so come back,
+    // and say so in case a reload went by meanwhile. Queued, so the socket
+    // closing as this object goes does not call back into it.
+    connect(
+        &m_socket, &QLocalSocket::disconnected, this,
+        [this] {
+            QTimer::singleShot(1000, this, [this] {
+                m_socket.connectToServer(m_path);
+                emit reloaded();
+            });
+        },
+        Qt::QueuedConnection);
+}
+
+void HyprlandReloads::listen(const QString &socket) {
+    m_path = socket;
+    if (!m_path.isEmpty())
+        m_socket.connectToServer(m_path);
+}
+
+QString HyprlandReloads::socket() {
+    const QString signature = qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE");
+    return signature.isEmpty() ? QString()
+                               : qEnvironmentVariable("XDG_RUNTIME_DIR") + "/hypr/" + signature + "/.socket2.sock";
+}
+
+Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl, const QString &hyprlandEvents)
     : QObject(parent),
       m_directory(directory.isEmpty() ? QDir::homePath() + "/.local/state/omarchy/current" : directory) {
     m_debounce.setSingleShot(true);
@@ -21,7 +54,8 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     connect(&m_debounce, &QTimer::timeout, this, &Theme::reload);
 
     // Corners follow Hyprland's effective rounding, which themes and personal
-    // overrides can both set, so ask hyprctl rather than reading its config.
+    // overrides can both set, so ask hyprctl rather than reading its config,
+    // and ask again each time Hyprland reloads rather than every second.
     // Without Hyprland the corners stay sharp, like Omarchy's default.
     m_hyprctl = !hyprctl.isEmpty() ? hyprctl
               : directory.isEmpty() && !qEnvironmentVariableIsEmpty("HYPRLAND_INSTANCE_SIGNATURE")
@@ -32,6 +66,8 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     connect(&m_roundingProcess, &QProcess::errorOccurred, this, [this] { m_roundingTimeout.stop(); });
     connect(&m_roundingProcess, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         m_roundingTimeout.stop();
+        if (std::exchange(m_roundingAgain, false))
+            QTimer::singleShot(0, this, &Theme::refreshRounding);
         const auto value = QJsonDocument::fromJson(m_roundingProcess.readAllStandardOutput()).object().value("int");
         if (code != 0 || status != QProcess::NormalExit || !value.isDouble() || value.toInt(-1) < 0)
             return;
@@ -40,10 +76,11 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
             emit changed();
         }
     });
-    m_roundingPoll.setInterval(1000);
-    connect(&m_roundingPoll, &QTimer::timeout, this, &Theme::refreshRounding);
-    if (!m_hyprctl.isEmpty())
-        m_roundingPoll.start();
+    connect(&m_reloads, &HyprlandReloads::reloaded, this, &Theme::refreshRounding);
+    m_reloads.listen(!hyprlandEvents.isEmpty() ? hyprlandEvents
+                     : directory.isEmpty()     ? HyprlandReloads::socket()
+                                               : QString());
+    refreshRounding();
     reload();
 }
 
@@ -55,8 +92,14 @@ Theme::~Theme() {
 }
 
 void Theme::refreshRounding() {
-    if (m_hyprctl.isEmpty() || m_roundingProcess.state() != QProcess::NotRunning)
+    if (m_hyprctl.isEmpty())
         return;
+    // The answer on its way may predate what changed, so ask once more
+    // when it is in.
+    if (m_roundingProcess.state() != QProcess::NotRunning) {
+        m_roundingAgain = true;
+        return;
+    }
     m_roundingProcess.start(m_hyprctl, {"-j", "getoption", "decoration:rounding"});
     m_roundingTimeout.start();
 }
@@ -82,7 +125,6 @@ QString Theme::accentForeground() const {
 }
 
 void Theme::reload() {
-    refreshRounding();
     const auto paths = m_watcher.files() + m_watcher.directories();
     if (!paths.isEmpty())
         m_watcher.removePaths(paths);

@@ -40,6 +40,7 @@
     "one": "%n rappel terminé supprimé",
     "other": "%n rappels terminés supprimés"
   },
+  "Deleted “%1”. Undo brings it back.": "« %1 » supprimé. Annuler le restaure.",
   "Details": "Détails",
   "Done. Next: %1": "Terminé. Suivant : %1",
   "Due": "Échéance",
@@ -152,6 +153,7 @@
   "Search": "Rechercher",
   "Sections belong to a list. Open one first.": "Les sections appartiennent à une liste. Ouvrez-en une d’abord.",
   "Select a reminder to see its details": "Sélectionnez un rappel pour voir ses détails",
+  "Shortcuts": "Raccourcis",
   "Show or hide completed": "Afficher ou masquer les terminés",
   "Show or hide details": "Afficher ou masquer les détails",
   "Sorted by %1": "Trié par %1",

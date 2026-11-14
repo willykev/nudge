@@ -40,6 +40,7 @@
     "one": "%n promemoria completato eliminato",
     "other": "%n promemoria completati eliminati"
   },
+  "Deleted “%1”. Undo brings it back.": "“%1” eliminato. Annulla lo ripristina.",
   "Details": "Dettagli",
   "Done. Next: %1": "Fatto. Prossimo: %1",
   "Due": "Scadenza",
@@ -152,6 +153,7 @@
   "Search": "Cerca",
   "Sections belong to a list. Open one first.": "Le sezioni appartengono a una lista. Aprine prima una.",
   "Select a reminder to see its details": "Seleziona un promemoria per vederne i dettagli",
+  "Shortcuts": "Scorciatoie",
   "Show or hide completed": "Mostra o nascondi completati",
   "Show or hide details": "Mostra o nascondi dettagli",
   "Sorted by %1": "Ordinati per %1",

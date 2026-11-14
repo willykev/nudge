@@ -40,6 +40,7 @@
     "one": "%n lembrete concluído excluído",
     "other": "%n lembretes concluídos excluídos"
   },
+  "Deleted “%1”. Undo brings it back.": "“%1” excluído. Desfazer o restaura.",
   "Details": "Detalhes",
   "Done. Next: %1": "Pronto. Próximo: %1",
   "Due": "Vencimento",
@@ -152,6 +153,7 @@
   "Search": "Buscar",
   "Sections belong to a list. Open one first.": "As seções pertencem a uma lista. Abra uma primeiro.",
   "Select a reminder to see its details": "Selecione um lembrete para ver os detalhes",
+  "Shortcuts": "Atalhos",
   "Show or hide completed": "Mostrar ou ocultar concluídos",
   "Show or hide details": "Mostrar ou ocultar detalhes",
   "Sorted by %1": "Ordenado por %1",

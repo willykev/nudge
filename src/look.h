@@ -9,10 +9,13 @@
 #include <QTimer>
 #include <QVariantMap>
 
+#include "theme.h"
+
 // How Omarchy looks right now, so Nudge can look the same: the whole palette
 // of the current theme (colors.toml), the control states and type size the
-// Omarchy shell draws its own panels with (shell.toml), and Hyprland's window
-// border and whether it animates. All of it is followed live.
+// Omarchy shell draws its own panels with (the theme's shell.toml, under the
+// person's own), and Hyprland's window border and whether it animates, which
+// Omarchy's animations toggle also says. All of it is followed live.
 //
 // Theme (theme.h) keeps supplying the accent and the corner rounding; this
 // adds everything else a window needs to sit among Omarchy's own.
@@ -37,7 +40,10 @@ class Look : public QObject {
     Q_PROPERTY(bool reduceMotion READ reduceMotion NOTIFY changed)
 
 public:
-    explicit Look(const QString &currentDirectory = {}, QObject *parent = nullptr, const QString &hyprctl = {});
+    // The person's own settings are read under home, as Omarchy keeps them;
+    // a current directory given without one is a theme on its own.
+    explicit Look(const QString &currentDirectory = {}, QObject *parent = nullptr, const QString &hyprctl = {},
+                  const QString &hyprlandEvents = {}, const QString &home = {});
     ~Look() override;
 
     QVariantMap colors() const { return m_colors; }
@@ -49,7 +55,7 @@ public:
     int fontSize() const { return m_fontSize; }
     int controlBorderWidth() const { return m_controlBorderWidth; }
     int windowBorderWidth() const { return m_windowBorderWidth; }
-    bool reduceMotion() const { return m_reduceMotion; }
+    bool reduceMotion() const { return m_animationsOff || m_hyprlandStill; }
 
     QColor color(const QString &role) const { return m_colors.value(role).value<QColor>(); }
 
@@ -67,15 +73,19 @@ private:
     void askHyprland();
 
     QString m_directory;
+    QString m_toggles, m_ownShell;
     QVariantMap m_colors, m_swatches;
     bool m_dark = true;
     int m_fontSize = 12;
     int m_controlBorderWidth = 1;
     int m_windowBorderWidth = 2;
-    bool m_reduceMotion = false;
+    bool m_animationsOff = false; // Omarchy's toggle
+    bool m_hyprlandStill = false; // Hyprland's own answer
 
     QFileSystemWatcher m_watcher;
     QTimer m_debounce;
     QString m_hyprctl;
     QProcess m_borderProcess, m_animationsProcess;
+    bool m_askAgain = false;
+    HyprlandReloads m_reloads;
 };

@@ -40,6 +40,7 @@
     "one": "%n voltooide herinnering verwijderd",
     "other": "%n voltooide herinneringen verwijderd"
   },
+  "Deleted “%1”. Undo brings it back.": "“%1” verwijderd. Met Ongedaan maken komt die terug.",
   "Details": "Details",
   "Done. Next: %1": "Klaar. Volgende: %1",
   "Due": "Vervalt",
@@ -152,6 +153,7 @@
   "Search": "Zoek",
   "Sections belong to a list. Open one first.": "Secties horen bij een lijst. Open eerst een lijst.",
   "Select a reminder to see its details": "Selecteer een herinnering om de details te zien",
+  "Shortcuts": "Sneltoetsen",
   "Show or hide completed": "Toon of verberg voltooide",
   "Show or hide details": "Toon of verberg details",
   "Sorted by %1": "Gesorteerd op %1",

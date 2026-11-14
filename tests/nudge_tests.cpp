@@ -2,6 +2,8 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickItem>
@@ -3002,10 +3004,15 @@ private slots:
         write(command, "#!/bin/sh\ncat '" + response.toUtf8() + "'\n");
         QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         write(response, "{\"int\":0}");
+        QLocalServer hyprland;
+        QVERIFY2(hyprland.listen(dir.filePath("events")), qPrintable(hyprland.errorString()));
 
-        Theme theme(dir.path(), nullptr, command);
+        Theme theme(dir.path(), nullptr, command, dir.filePath("events"));
         QCOMPARE(theme.radius(), 0);
         write(response, "{\"int\":6}");
+        // Hyprland says when it has reloaded its config.
+        QVERIFY(hyprland.waitForNewConnection(5000));
+        hyprland.nextPendingConnection()->write("configreloaded>>\n");
         QTRY_COMPARE(theme.radius(), 6);
     }
 
@@ -3042,6 +3049,220 @@ private slots:
         QCOMPARE(translator.translate("Main", "%n clips", nullptr, 25), QString("%n клипов"));
         QCOMPARE(Translator::pluralCategory("ar", 11), QString("many"));
         QCOMPARE(Translator::pluralCategory("ja", 1), QString("other"));
+    }
+
+    // ---- desktop (review fixes) ----
+
+private:
+    // A counted string as the window shows it in a language, through the
+    // translator the app installs and the catalogs it ships.
+    static QString shown(const QByteArray &language, const char *text, int count) {
+        QTemporaryDir dir;
+        write(dir.filePath("language"), language + "\n");
+        Translator translator(dir.filePath("language"), ":/i18n");
+        QCoreApplication::installTranslator(&translator);
+        const QString result = QCoreApplication::translate("Backend", text, "", count);
+        QCoreApplication::removeTranslator(&translator);
+        return result;
+    }
+
+    static int lineCount(const QString &path) {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? int(file.readAll().count('\n')) : 0;
+    }
+
+private slots:
+    // English standing in for a language Nudge has no catalog for counts the
+    // English way, whatever that language's own rules say.
+    void englishStandingInCountsTheEnglishWay() {
+        // Filipino counts 2 as "one", Japanese has no "one", Russian counts 21 as "one".
+        QCOMPARE(shown("fil", "Its %n reminders are deleted with it. Undo brings them back.", 2),
+                 QString("Its 2 reminders are deleted with it. Undo brings them back."));
+        QCOMPARE(shown("ja", "Deleted %n completed reminders", 1), QString("Deleted 1 completed reminder"));
+        QCOMPARE(shown("ru", "Every %n days", 21), QString("Every 21 days"));
+        // A language with a catalog keeps its own rules: French counts 0 as one.
+        QCOMPARE(shown("fr", "Deleted %n completed reminders", 0), QString("0 rappel terminé supprimé"));
+    }
+
+    void aCountedStringACatalogLacksIsCountedInEnglish() {
+        QTemporaryDir dir;
+        write(dir.filePath("language"), "fr\n");
+        write(dir.filePath("en.json"), R"({"%n clips": {"one": "%n clip", "other": "%n clips"}})");
+        write(dir.filePath("fr.json"), R"({"%n files": {"one": "%n fichier", "other": "%n fichiers"}})");
+        Translator translator(dir.filePath("language"), dir.path());
+        QCOMPARE(translator.translate("Main", "%n clips", nullptr, 0), QString("%n clips"));
+        QCOMPARE(translator.translate("Main", "%n files", nullptr, 0), QString("%n fichier"));
+    }
+
+    // Every string the sources translate is in every catalog but English's,
+    // which holds only the forms of counted strings.
+    void everyCatalogTranslatesEveryString() {
+        const QDir sources(SOURCE_DIRECTORY);
+        static const QRegularExpression call("(?:\\b(?:qsTr|tr)\\(|QT_TRANSLATE_NOOP\\(\"\\w+\",\\s*|"
+                                             "QCoreApplication::translate\\(\"\\w+\",\\s*)\"((?:[^\"\\\\]|\\\\.)*)\"");
+        QStringList wanted;
+        for (const QString &name : sources.entryList({"*.qml", "*.cpp"}, QDir::Files)) {
+            QFile file(sources.filePath(name));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            auto calls = call.globalMatch(QString::fromUtf8(file.readAll()));
+            while (calls.hasNext())
+                wanted << calls.next().captured(1);
+        }
+        wanted.removeDuplicates();
+        QVERIFY2(wanted.size() > 100, qPrintable(QString::number(wanted.size()) + " strings found"));
+
+        QStringList missing;
+        for (const QString &name : QDir(sources.filePath("i18n")).entryList({"*.json"}, QDir::Files)) {
+            if (name == "en.json")
+                continue;
+            QFile file(sources.filePath("i18n/" + name));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            // Compared as the sources write them, quotes and backslashes escaped.
+            QStringList keys = QJsonDocument::fromJson(file.readAll()).object().keys();
+            for (QString &key : keys)
+                key.replace('\\', "\\\\").replace('"', "\\\"");
+            for (const QString &text : wanted)
+                if (!keys.contains(text))
+                    missing << name + ": " + text;
+        }
+        QVERIFY2(missing.isEmpty(), qPrintable("Not translated:\n" + missing.join('\n')));
+    }
+
+    // Hyprland is asked again when it has reloaded its config, not every second.
+    void hyprlandIsAskedWhenItReloads() {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkpath("current") && QDir(dir.path()).mkpath("hyprland"));
+        const QString current = dir.filePath("current"), calls = dir.filePath("hyprland/calls"),
+                      response = dir.filePath("hyprland/response"), command = dir.filePath("hyprland/hyprctl"),
+                      slow = dir.filePath("hyprland/slow");
+        // Reads its answer, notes the call, and with `slow` there takes a moment to give it.
+        write(command, "#!/bin/sh\nanswer=$(cat '" + response.toUtf8() + "')\necho \"$3\" >> '" + calls.toUtf8() +
+                           "'\n[ -e '" + slow.toUtf8() + "' ] && sleep 0.2\necho \"$answer\"\n");
+        QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        write(response, "{\"int\": 3}");
+        QLocalServer hyprland;
+        QVERIFY2(hyprland.listen(dir.filePath("hyprland/events")), qPrintable(hyprland.errorString()));
+
+        Theme theme(current, nullptr, command, hyprland.fullServerName());
+        QVERIFY(hyprland.waitForNewConnection(5000));
+        QLocalSocket *themeEvents = hyprland.nextPendingConnection();
+        Look look(current, nullptr, command, hyprland.fullServerName());
+        QVERIFY(hyprland.waitForNewConnection(5000));
+        QLocalSocket *lookEvents = hyprland.nextPendingConnection();
+        QTRY_COMPARE(theme.radius(), 3);
+        QTRY_COMPARE(look.windowBorderWidth(), 3);
+        QTRY_COMPARE(lineCount(calls), 3); // the rounding, the border, and the animations
+        QTest::qWait(1500);
+        QCOMPARE(lineCount(calls), 3);
+
+        // Other news, and half a line, ask nothing; the rest of the line does.
+        write(response, "{\"int\": 5}");
+        for (QLocalSocket *events : {themeEvents, lookEvents})
+            events->write("activewindow>>kitty,~\nconfigrel");
+        QTest::qWait(300);
+        QCOMPARE(lineCount(calls), 3);
+        for (QLocalSocket *events : {themeEvents, lookEvents})
+            events->write("oaded>>\n");
+        QTRY_COMPARE(theme.radius(), 5);
+        QTRY_COMPARE(look.windowBorderWidth(), 5);
+        QTRY_COMPARE(lineCount(calls), 6);
+
+        // A reload announced while an answer is on its way, read before the
+        // change, has Hyprland asked once more.
+        write(slow, "");
+        for (QLocalSocket *events : {themeEvents, lookEvents})
+            events->write("configreloaded>>\n");
+        QTRY_COMPARE(lineCount(calls), 9);
+        write(response, "{\"int\": 7}");
+        for (QLocalSocket *events : {themeEvents, lookEvents})
+            events->write("configreloaded>>\n");
+        QTRY_COMPARE(theme.radius(), 7);
+        QTRY_COMPARE(look.windowBorderWidth(), 7);
+        QTRY_COMPARE(lineCount(calls), 12);
+        QVERIFY(QFile::remove(slow));
+
+        // Hyprland lets go of a listener that falls far behind; it comes
+        // back, and asks, as a reload may have gone by.
+        write(response, "{\"int\": 9}");
+        themeEvents->disconnectFromServer();
+        QTRY_VERIFY(hyprland.hasPendingConnections());
+        QTRY_COMPARE(theme.radius(), 9);
+        write(response, "{\"int\": 11}");
+        hyprland.nextPendingConnection()->write("configreloaded>>\n");
+        QTRY_COMPARE(theme.radius(), 11);
+    }
+
+    // `omarchy toggle animations` stills the window as it stills Hyprland,
+    // even before Hyprland has reloaded, and without Hyprland at all.
+    void theLookFollowsTheAnimationsToggle() {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkpath("current"));
+        Look look(dir.filePath("current"), nullptr, {}, {}, dir.path());
+        QVERIFY(!look.reduceMotion());
+
+        // The first toggle makes the directory its flags go in.
+        const QString flag = dir.filePath(".local/state/omarchy/toggles/hypr/no-animations.lua");
+        QVERIFY(QDir().mkpath(QFileInfo(flag).absolutePath()));
+        write(flag, "hl.config({ animations = { enabled = false } })\n");
+        QTRY_VERIFY(look.reduceMotion());
+        QVERIFY(QFile::remove(flag));
+        QTRY_VERIFY(!look.reduceMotion());
+        write(flag, "hl.config({ animations = { enabled = false } })\n");
+        QTRY_VERIFY(look.reduceMotion());
+    }
+
+    // The person's own ~/.config/omarchy/shell.toml, where `omarchy display
+    // text size` keeps its size, lies over the theme's and outlives a switch.
+    void theLookTakesThePersonsOwnShellSettings() {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkpath("current/theme"));
+        const QString themeShell = dir.filePath("current/theme/shell.toml"),
+                      own = dir.filePath(".config/omarchy/shell.toml");
+        write(themeShell, "[font]\nbase-size = 14\n[controls]\nnormal-border-width = 2\n");
+        Look look(dir.filePath("current"), nullptr, {}, {}, dir.path());
+        QCOMPARE(look.fontSize(), 14);
+
+        QVERIFY(QDir(dir.path()).mkpath(".config/omarchy"));
+        write(own, "[font]\nbase-size = 16\n");
+        QTRY_COMPARE(look.fontSize(), 16);
+        QCOMPARE(look.controlBorderWidth(), 2); // the theme's other settings stay
+
+        write(themeShell, "[font]\nbase-size = 10\n");
+        QTRY_COMPARE(look.controlBorderWidth(), 1);
+        QCOMPARE(look.fontSize(), 16);
+
+        // The command replaces the file, writing a new one and moving it over.
+        QSaveFile replacement(own);
+        QVERIFY(replacement.open(QIODevice::WriteOnly));
+        replacement.write("[font]\nbase-size = 18\n");
+        QVERIFY(replacement.commit());
+        QTRY_COMPARE(look.fontSize(), 18);
+
+        QVERIFY(QFile::remove(own));
+        QTRY_COMPARE(look.fontSize(), 10);
+    }
+
+    // Made as the app makes it, the look finds the person's own settings in
+    // their home. Without Hyprland's signature nothing real is asked.
+    void theLookFindsThePersonsSettingsAtHome() {
+        QTemporaryDir home;
+        const QByteArray realHome = qgetenv("HOME"), signature = qgetenv("HYPRLAND_INSTANCE_SIGNATURE");
+        const auto restore = qScopeGuard([&] {
+            qputenv("HOME", realHome);
+            if (!signature.isEmpty())
+                qputenv("HYPRLAND_INSTANCE_SIGNATURE", signature);
+        });
+        qputenv("HOME", home.path().toUtf8());
+        qunsetenv("HYPRLAND_INSTANCE_SIGNATURE");
+        QVERIFY(qEnvironmentVariableIsEmpty("HYPRLAND_INSTANCE_SIGNATURE") && HyprlandReloads::socket().isEmpty());
+        QVERIFY(QDir(home.path()).mkpath(".config/omarchy"));
+        QVERIFY(QDir(home.path()).mkpath(".local/state/omarchy/toggles/hypr"));
+        write(home.filePath(".config/omarchy/shell.toml"), "[font]\nbase-size = 17\n");
+        write(home.filePath(".local/state/omarchy/toggles/hypr/no-animations.lua"), "");
+
+        Look look;
+        QCOMPARE(look.fontSize(), 17);
+        QVERIFY(look.reduceMotion());
     }
 
     // Every catalog is listed in the resources, only translates text the

@@ -40,6 +40,7 @@
     "one": "Slettede %n fuldført påmindelse",
     "other": "Slettede %n fuldførte påmindelser"
   },
+  "Deleted “%1”. Undo brings it back.": "Slettede »%1«. Fortryd henter den tilbage.",
   "Details": "Detaljer",
   "Done. Next: %1": "Udført. Næste: %1",
   "Due": "Forfald",
@@ -152,6 +153,7 @@
   "Search": "Søg",
   "Sections belong to a list. Open one first.": "Afsnit hører til en liste. Åbn en liste først.",
   "Select a reminder to see its details": "Vælg en påmindelse for at se detaljerne",
+  "Shortcuts": "Genveje",
   "Show or hide completed": "Vis eller skjul fuldførte",
   "Show or hide details": "Vis eller skjul detaljer",
   "Sorted by %1": "Sorteret efter %1",

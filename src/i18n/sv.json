@@ -40,6 +40,7 @@
     "one": "Tog bort %n slutförd påminnelse",
     "other": "Tog bort %n slutförda påminnelser"
   },
+  "Deleted “%1”. Undo brings it back.": "Tog bort ”%1”. Ångra tar tillbaka den.",
   "Details": "Detaljer",
   "Done. Next: %1": "Klart. Nästa: %1",
   "Due": "Förfaller",
@@ -152,6 +153,7 @@
   "Search": "Sök",
   "Sections belong to a list. Open one first.": "Sektioner hör till en lista. Öppna en lista först.",
   "Select a reminder to see its details": "Välj en påminnelse för att se detaljerna",
+  "Shortcuts": "Kortkommandon",
   "Show or hide completed": "Visa eller dölj slutförda",
   "Show or hide details": "Visa eller dölj detaljer",
   "Sorted by %1": "Sorterad efter %1",

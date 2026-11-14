@@ -40,6 +40,7 @@
     "one": "Se eliminó %n recordatorio completado",
     "other": "Se eliminaron %n recordatorios completados"
   },
+  "Deleted “%1”. Undo brings it back.": "Se eliminó “%1”. Deshacer lo recupera.",
   "Details": "Detalles",
   "Done. Next: %1": "Listo. Siguiente: %1",
   "Due": "Vencimiento",
@@ -152,6 +153,7 @@
   "Search": "Buscar",
   "Sections belong to a list. Open one first.": "Las secciones pertenecen a una lista. Abre una primero.",
   "Select a reminder to see its details": "Selecciona un recordatorio para ver sus detalles",
+  "Shortcuts": "Atajos",
   "Show or hide completed": "Mostrar u ocultar completados",
   "Show or hide details": "Mostrar u ocultar detalles",
   "Sorted by %1": "Ordenado por %1",

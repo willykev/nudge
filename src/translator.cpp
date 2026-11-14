@@ -81,12 +81,15 @@ QLocale Translator::formatLocale(const QString &language) {
 
 QString Translator::translate(const char *, const char *sourceText, const char *, int n) const {
     // A null string tells Qt there is no translation, so it shows the English.
-    const QJsonValue value = m_strings.value(QString::fromUtf8(sourceText));
+    const QString key = QString::fromUtf8(sourceText);
+    const QJsonValue value = m_strings.value(key);
     if (value.isString())
         return value.toString();
     if (value.isObject()) {
+        // Forms are picked by the rules of the language they are written in,
+        // so English standing in for a missing catalog counts the English way.
         const QJsonObject forms = value.toObject();
-        const QString form = forms.value(n < 0 ? "other" : pluralCategory(m_language, n)).toString();
+        const QString form = forms.value(n < 0 ? "other" : pluralCategory(m_catalogs.value(key), n)).toString();
         return form.isEmpty() ? forms.value("other").toString() : form;
     }
     return {};
@@ -114,6 +117,7 @@ void Translator::reload() {
     // the base language and the regional file over it (pt, then pt-BR), so a
     // missing string falls back toward English one step at a time.
     QHash<QString, QJsonValue> strings;
+    QHash<QString, QString> catalogs;
     QStringList codes{"en", language.section('-', 0, 0), language};
     codes.removeDuplicates();
     for (const auto &code : codes) {
@@ -122,12 +126,15 @@ void Translator::reload() {
             continue;
         const QJsonObject object = QJsonDocument::fromJson(catalog.readAll()).object();
         for (auto it = object.begin(); it != object.end(); ++it)
-            if ((it.value().isString() && !it.value().toString().isEmpty()) || it.value().isObject())
+            if ((it.value().isString() && !it.value().toString().isEmpty()) || it.value().isObject()) {
                 strings.insert(it.key(), it.value());
+                catalogs.insert(it.key(), code);
+            }
     }
 
     m_language = language;
     m_strings = strings;
+    m_catalogs = catalogs;
     // Dates, numbers, and Qt's own day and month names follow the language
     // too, and right-to-left languages mirror the window.
     const QLocale locale = formatLocale(language);

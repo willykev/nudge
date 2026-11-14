@@ -40,6 +40,7 @@
     "one": "%n erledigte Erinnerung gelöscht",
     "other": "%n erledigte Erinnerungen gelöscht"
   },
+  "Deleted “%1”. Undo brings it back.": "„%1“ gelöscht. Mit „Rückgängig“ kommt sie zurück.",
   "Details": "Details",
   "Done. Next: %1": "Erledigt. Nächste: %1",
   "Due": "Fällig",
@@ -152,6 +153,7 @@
   "Search": "Suchen",
   "Sections belong to a list. Open one first.": "Abschnitte gehören zu einer Liste. Öffne zuerst eine Liste.",
   "Select a reminder to see its details": "Wähle eine Erinnerung aus, um ihre Details zu sehen",
+  "Shortcuts": "Tastenkürzel",
   "Show or hide completed": "Erledigte ein- oder ausblenden",
   "Show or hide details": "Details ein- oder ausblenden",
   "Sorted by %1": "Sortiert nach %1",

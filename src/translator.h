@@ -40,6 +40,7 @@ private:
     QString m_catalogDirectory;
     QString m_language;
     QHash<QString, QJsonValue> m_strings;
+    QHash<QString, QString> m_catalogs; // the catalog each string came from
     QFileSystemWatcher m_watcher;
     QTimer m_debounce;
 };
