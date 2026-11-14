@@ -3995,6 +3995,67 @@ private slots:
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
     }
 
+    void typingForANewReminderOutlastsAnAlertsOpen_data() {
+        QTest::addColumn<bool>("sections");
+        QTest::newRow("its list's first row by sections") << true;
+        QTest::newRow("its list's first row by title") << false;
+    }
+
+    // Words typed in the details for a new reminder, not yet entered, when an
+    // alert's Open shows the list the new reminder now heads.
+    void typingForANewReminderOutlastsAnAlertsOpen() {
+        QFETCH(bool, sections);
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home"), work = addList(w.store, "Work");
+        add(w.store, home, "Alpha", friday.date());
+        const qint64 beta = add(w.store, work, "Beta", friday.date(), 15 * 60);
+        const qint64 report = add(w.store, work, "Report", friday.date().addDays(3), 9 * 60);
+        if (sections) {
+            Section later;
+            later.listId = work;
+            later.name = "Later";
+            later.position = 1;
+            const qint64 laterId = w.store.put(later);
+            for (const qint64 id : {beta, report}) {
+                Reminder r = *w.store.reminder(id);
+                r.sectionId = laterId;
+                w.store.put(r);
+            }
+        } else {
+            w.backend.setViewKey("list:" + QString::number(work));
+            w.backend.setSortMode("title");
+        }
+        w.backend.setViewKey("today");
+        w.backend.setSelectedId(beta);
+        w.store.clearUndo();
+        QVERIFY(w.open(true));
+        QQuickItem *title = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickTextField") && item->property("text").toString() == "Beta";
+        });
+        QVERIFY(title);
+
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 draft = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QCOMPARE(w.backend.draftId(), draft);
+        w.type("Call the bank");
+        QVERIFY(w.window->isActive());
+
+        // What Backend::reveal does for the alert, without asking Hyprland.
+        w.backend.setViewKey("list:" + QString::number(work));
+        w.backend.setSelectedId(report);
+        QTRY_VERIFY(w.store.reminder(draft));
+        QCOMPARE(w.store.reminder(draft)->title, QString("Call the bank"));
+        QCOMPARE(w.store.reminder(beta)->title, QString("Beta"));
+        // Added and named in one step.
+        w.backend.undo();
+        QVERIFY(!w.store.reminder(draft));
+        QVERIFY(!w.store.canUndo());
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
     // ---- The look of the desktop -------------------------------------------------------
 
     void theLookFallsBackToOmarchysDefault() {

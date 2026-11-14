@@ -51,6 +51,10 @@ Rectangle {
     Connections {
         target: backend
         function onSelectedChanged() { pane.load() }
+        // A new view can pick the reminder being filled in as its first row,
+        // so the selection reads the same, yet the view leaving it settles
+        // it: what was typed for it is saved first.
+        function onViewChanged() { pane.flush() }
     }
     Component.onCompleted: load()
 
