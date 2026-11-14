@@ -20,6 +20,10 @@ command needs a display, and the window updates at once if it is open.
   of the text. Options say the same explicitly: `--list`, `--due`, `--time`,
   `--repeat`, `--priority`, `--flag`, `--tag`, `--notes`, `--url`, `--parent <id>`
   for a subtask, and `--literal` to keep the text word for word.
+- Times: one without am or pm is a guess, in the text and in `--time` alike.
+  An hour from 1 to 7 is the afternoon (`at 5` is 17:00, and on a 12-hour
+  clock `5:30` is 17:30), 8 to 11 the morning, and 12 noon; `tonight at 9` is
+  21:00. Write `5:30am` or `05:30` for an early time.
 - See: `nudge list today --json` (also `scheduled`, `all`, `flagged`,
   `completed`, or `--list <name>`, `--tag <tag>`, `--search <text>`), and
   `nudge show <id> --json` for one reminder with its subtasks.

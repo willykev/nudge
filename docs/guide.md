@@ -18,7 +18,10 @@ on, and keeps everything in one local file.
   keeps what was done in Completed.
 - **Typed dates.** A new reminder reads its own date as you type:
   `Call the dentist tomorrow at 9 #health !!` is a title, a date, a time, a
-  tag, and a priority. The date field takes the same words.
+  tag, and a priority. The date field takes the same words. A time without am
+  or pm is a guess: an hour from 1 to 7 is the afternoon (`at 5` is 17:00, and
+  on a 12-hour clock `5:30` is 17:30), 8 to 11 the morning, and 12 noon. Type
+  `5:30am` or `05:30` for an early time.
 - **Alerts** as desktop notifications, with buttons to complete the reminder
   or be reminded in an hour or tomorrow. A reminder with a date but no time
   alerts at nine in the morning.
@@ -43,12 +46,13 @@ follows it live, the way the Omarchy shell and Hype do:
   faint fill, a hairline around it, and its title in the accent. Everything
   else is the theme's text color, with color kept for the small marks: a
   list's dot, a flag, an overdue date.
-- **The Omarchy font**, the one `omarchy font set` chooses, at the size the
-  theme gives the shell. A font change shows the next time Nudge starts.
+- **The Omarchy font**, the one `omarchy font set` chooses, at the shell's
+  size: the theme's, or your own from `omarchy display text size`. A new size
+  shows at once, a new font the next time Nudge starts.
 - **Hyprland's window corners and border**: checkboxes, buttons, and dialogs
   are square where windows are square and round where they are round, and
-  dialogs wear the window border. With animations switched off in Hyprland,
-  nothing in Nudge moves either.
+  dialogs wear the window border. With animations switched off in Hyprland
+  or by `omarchy toggle animations`, nothing in Nudge moves either.
 
 ## Install
 
