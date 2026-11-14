@@ -30,7 +30,14 @@ Item {
     readonly property bool selected: backend.selectedId === rid
     // The cursor: this row is the one the keys act on.
     readonly property bool cursor: selected && app.pane === "list"
-    readonly property bool editing: app.editingId === rid
+    // A row waiting in the list's pool still holds the id of the one it showed
+    // last, while another row may show that reminder now: only one of them can
+    // be typed in, or the two would take the keyboard from each other and end
+    // the edit. A row pooled mid-typing, its field keeping the keyboard, stays
+    // the one being typed in.
+    property bool inPool: false
+    property bool keptTyping: false
+    readonly property bool editing: app.editingId === rid && (!inPool || keptTyping)
     readonly property bool draft: backend.draftId === rid
     readonly property bool hasMeta: dueText !== "" || repeatText !== "" || tags !== "" || link !== ""
                                     || listName !== "" || parentTitle !== ""
@@ -58,7 +65,11 @@ Item {
     }
 
     // A row that left mid-fade must not come back from the pool half faded.
-    ListView.onReused: opacity = 1
+    ListView.onReused: {
+        inPool = false
+        keptTyping = false
+        opacity = 1
+    }
 
     function startEditing() {
         app.activeEditor = editor
@@ -67,10 +78,12 @@ Item {
         editor.cursorPosition = editor.text.length
     }
     onEditingChanged: {
-        if (editing)
+        if (editing) {
             startEditing()
-        else
+        } else {
+            keptTyping = false
             editor.focus = false // or the list would hand the keyboard straight back
+        }
     }
     Component.onCompleted: if (editing) startEditing()
     // A row taken away mid-edit keeps what was typed, as clicking away does:
@@ -78,7 +91,12 @@ Item {
     // keyboard. One scrolled out of sight while its field has the keyboard
     // is still being typed in, and comes back with the typing.
     Component.onDestruction: if (row.editing) app.finishEdit(editor.text, false)
-    ListView.onPooled: if (row.editing && !editor.activeFocus) app.finishEdit(editor.text, false)
+    ListView.onPooled: {
+        if (row.editing && !editor.activeFocus)
+            app.finishEdit(editor.text, false)
+        keptTyping = row.editing && editor.activeFocus
+        inPool = true
+    }
 
     // The row under the keys is drawn as the Omarchy menu draws its own: a
     // faint fill, a hairline around it, and its title in the accent.
