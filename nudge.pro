@@ -4,7 +4,8 @@ CONFIG += c++20 release
 TARGET = nudge
 TEMPLATE = app
 
-DEFINES += NUDGE_VERSION=\\\"0.1.0\\\"
+VERSION = $$cat($$PWD/VERSION)
+DEFINES += NUDGE_VERSION=\\\"$$VERSION\\\"
 
 HEADERS += \
     src/alerts.h \

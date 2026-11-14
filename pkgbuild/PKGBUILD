@@ -5,11 +5,15 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc='Reminders and to-do lists for the Omarchy desktop'
 arch=('x86_64' 'aarch64')
+url='https://github.com/willykev/nudge'
 license=('MIT')
+options=('!debug')
 # Same binary path as the AUR's nudge, and replaces this app's old package name.
 conflicts=('nudge')
 depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland')
 makedepends=('gcc' 'make')
+# This recipe builds a checkout. bin/release also produces a standalone
+# download recipe with a versioned source URL and SHA-256 checksum.
 source=()
 sha256sums=()
 

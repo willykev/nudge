@@ -7,4 +7,4 @@ cd "$ROOT/build/tests"
 
 qmake6 "$ROOT/tests/nudge_tests.pro"
 make -s -j"$(nproc)"
-QT_QPA_PLATFORM=offscreen ./nudge_tests "$@"
+QT_QPA_PLATFORMTHEME=generic QT_QUICK_BACKEND=software QT_QPA_PLATFORM=offscreen ./nudge_tests "$@"

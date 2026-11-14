@@ -2,6 +2,9 @@
 
 # Nudge
 
+[![Build](https://github.com/willykev/nudge/actions/workflows/build.yml/badge.svg)](https://github.com/willykev/nudge/actions/workflows/build.yml)
+[Releases](https://github.com/willykev/nudge/releases) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+
 A reminders app for Omarchy. Keep your lists in order, plan your day, and get a
 nudge when something is due.
 
@@ -14,9 +17,13 @@ Everything stays on your computer. No account or cloud service is required.
 
 ## Install
 
-From the project folder on Omarchy or Arch Linux:
+Download an ARM64 (`aarch64`) Arch package from [Releases](https://github.com/willykev/nudge/releases)
+and install it with `sudo pacman -U <package-file>`. Intel/AMD (`x86_64`)
+users can build from source on Omarchy or Arch Linux:
 
 ```sh
+git clone https://github.com/willykev/nudge.git
+cd nudge
 bin/install
 ```
 
