@@ -747,6 +747,9 @@ void Backend::remove(qint64 id) {
     }
     const QString title = m_store->reminder(id)->title;
     m_store->removeReminder(id);
+    // A delete that failed has said so through the store, and left it here.
+    if (m_store->reminder(id))
+        return;
     // One key deletes, so say what went and how to get it back.
     if (!title.isEmpty())
         emit notice(tr("Deleted “%1”. Undo brings it back.").arg(title));

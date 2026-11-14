@@ -498,7 +498,7 @@ private slots:
         QTemporaryDir dir;
         Store store(dir.filePath("nudge.db"));
         const qint64 id = add(store, addList(store, "Home"), "Milk");
-        for (const QString &notes : {"S", "So", "Soy"}) {
+        for (const char *notes : {"S", "So", "Soy"}) {
             Store::Tx tx(&store, "notes:1");
             Reminder r = *store.reminder(id);
             r.notes = notes;
@@ -1774,10 +1774,13 @@ private slots:
         QVERIFY2(notices.last().first().toString().contains("database or disk is full"),
                  qPrintable(notices.last().first().toString()));
 
-        // A deletion that failed is not covered up by the word for one that worked.
+        // A deletion that failed says so, and never claims to have deleted.
         notices.clear();
         backend.remove(other);
-        QTRY_VERIFY(notices.size() >= 2);
+        QVERIFY(store.reminder(other));
+        QTRY_VERIFY(!notices.isEmpty());
+        for (const QList<QVariant> &notice : notices)
+            QVERIFY2(!notice.first().toString().startsWith("Deleted"), qPrintable(notice.first().toString()));
         QVERIFY2(notices.last().first().toString().contains("database or disk is full"),
                  qPrintable(notices.last().first().toString()));
     }
@@ -2383,6 +2386,50 @@ private slots:
     }
 
     // ---- Alerts -------------------------------------------------------------------
+
+    void commandsSayWhenAWriteFails() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        qint64 id = 0;
+        {
+            Store store(path);
+            id = add(store, addList(store, "Home"), "Milk");
+        }
+        // Every reminder write is an INSERT OR REPLACE, so this refuses them all.
+        tamper(path, "CREATE TRIGGER refuse BEFORE INSERT ON reminders BEGIN SELECT RAISE(ABORT, 'disk is full'); END");
+        const QString number = QString::number(id);
+
+        const CliRun edited = cliRun(path, {"edit", number, "--title", "Oat milk"});
+        QCOMPARE(edited.code, 1);
+        QVERIFY2(!edited.out.contains("Changed"), qPrintable(edited.out));
+        QVERIFY2(edited.err.contains("disk is full"), qPrintable(edited.err));
+
+        const CliRun done = cliRun(path, {"done", number});
+        QCOMPARE(done.code, 1);
+        QVERIFY2(!done.out.contains("Completed"), qPrintable(done.out));
+        QVERIFY2(done.err.contains("disk is full"), qPrintable(done.err));
+
+        const CliRun added = cliRun(path, {"add", "--literal", "Bread"});
+        QCOMPARE(added.code, 1);
+        QVERIFY2(!added.out.contains("Added"), qPrintable(added.out));
+
+        QFile backup(dir.filePath("backup.json"));
+        QVERIFY(backup.open(QIODevice::WriteOnly));
+        backup.write(R"({"nudge": 1, "lists": [{"name": "Garden"}],
+                         "reminders": [{"id": 1, "title": "Plant bulbs", "list": "Garden"}]})");
+        backup.close();
+        const CliRun imported = cliRun(path, {"import", backup.fileName()});
+        QCOMPARE(imported.code, 1);
+        QVERIFY2(!imported.out.contains("Imported"), qPrintable(imported.out));
+        QVERIFY2(imported.err.contains("Nothing was imported"), qPrintable(imported.err));
+
+        // Nothing reached the file: not the edits, not the import's new list.
+        Store store(path);
+        QCOMPARE(store.reminders().size(), 1);
+        QCOMPARE(store.reminder(id)->title, QString("Milk"));
+        QVERIFY(!store.reminder(id)->completed);
+        QCOMPARE(store.lists().size(), 1);
+    }
 
     void remindersAlertOnceWhenDue() {
         QTemporaryDir dir;
@@ -3398,12 +3445,16 @@ private slots:
     }
 
     void theLookFollowsAThemeSwitch() {
+        // One level down, as Omarchy's own current/ is: Look watches the
+        // parent too, and a busy system temp directory would keep putting
+        // off its reload.
         QTemporaryDir dir;
-        QDir(dir.path()).mkpath("theme");
-        write(dir.path() + "/theme/colors.toml", "background = \"#101010\"\n");
-        Look look(dir.path());
+        const QString current = dir.filePath("current");
+        QDir(current).mkpath("theme");
+        write(current + "/theme/colors.toml", "background = \"#101010\"\n");
+        Look look(current);
         QSignalSpy changed(&look, &Look::changed);
-        write(dir.path() + "/theme/colors.toml", "background = \"#fafafa\"\nforeground = \"#202020\"\n");
+        write(current + "/theme/colors.toml", "background = \"#fafafa\"\nforeground = \"#202020\"\n");
         QTRY_COMPARE(look.color("background"), QColor("#fafafa"));
         QVERIFY(changed.count() >= 1);
         QVERIFY(!look.dark()); // no mode given: told from the background

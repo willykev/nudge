@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 dbus sql
+QT += core gui qml quick quickcontrols2 dbus sql network
 
 CONFIG += c++20 release
 TARGET = nudge

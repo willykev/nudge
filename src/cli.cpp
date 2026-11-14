@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <optional>
 
 namespace {
 
@@ -62,6 +63,25 @@ struct Command {
     void json() { parser.addOption({"json", "Print the result as JSON"}); }
     bool wantsJson() const { return parser.isSet("json"); }
     QStringList arguments() const { return parser.positionalArguments().mid(1); }
+};
+
+// A write the store could not make arrives as Store::failed, and the store
+// then holds what the disk does. A command says so instead of reporting
+// success.
+class Failures {
+public:
+    explicit Failures(Store &store) {
+        QObject::connect(&store, &Store::failed, &m_guard, [this](const QString &why) {
+            if (m_message.isEmpty())
+                m_message = why;
+        });
+    }
+    bool any() const { return !m_message.isEmpty(); }
+    int report(const QString &what) const { return fail(what + ": " + m_message); }
+
+private:
+    QObject m_guard; // ends the connection along with this object
+    QString m_message;
 };
 
 bool ready(Store &store) {
@@ -332,6 +352,7 @@ int add(const QStringList &arguments) {
     // A done reminder has no open subtasks, so adding one reopens it.
     const Reminder *parent = store.reminder(parentId);
     const bool reopen = parent && parent->completed;
+    Failures failures(store);
     qint64 id = 0;
     {
         Store::Tx tx(&store);
@@ -339,6 +360,8 @@ int add(const QStringList &arguments) {
             store.reopen(parentId);
         id = store.put(r);
     }
+    if (failures.any())
+        return failures.report("The reminder could not be saved");
     const int result = report(command, store, id, "Added");
     if (result == 0 && reopen && !command.wantsJson())
         print(stdout, QString("Reopened %1: %2, which has something to do again")
@@ -380,17 +403,22 @@ int edit(const QStringList &arguments) {
     if (command.parser.isSet("unflag"))
         r.flagged = false;
 
-    Store::Tx tx(&store);
-    if (r.listId != listId) {
-        // Its subtasks move with it.
-        for (qint64 childId : store.childrenOf(id)) {
-            Reminder child = *store.reminder(childId);
-            child.listId = r.listId;
-            child.sectionId = 0;
-            store.put(child);
+    Failures failures(store);
+    {
+        Store::Tx tx(&store);
+        if (r.listId != listId) {
+            // Its subtasks move with it.
+            for (qint64 childId : store.childrenOf(id)) {
+                Reminder child = *store.reminder(childId);
+                child.listId = r.listId;
+                child.sectionId = 0;
+                store.put(child);
+            }
         }
+        store.put(r);
     }
-    store.put(r);
+    if (failures.any())
+        return failures.report("The change could not be saved");
     return report(command, store, id, "Changed");
 }
 
@@ -419,6 +447,7 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
     }
     QJsonArray changed;
     QStringList lines;
+    Failures failures(store);
     {
         Store::Tx tx(&store);
         for (qint64 id : ids) {
@@ -431,6 +460,8 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
                 changed << QJsonObject{{"id", id}, {"title", title}, {"deleted", true}};
         }
     }
+    if (failures.any())
+        return failures.report("Nothing was changed");
     if (command.wantsJson())
         print({{"reminders", changed}});
     else
@@ -552,7 +583,10 @@ int lists(const QStringList &arguments) {
         created.name = name;
         created.color = color.isEmpty() ? QString("blue") : color;
         created.position = store.lists().isEmpty() ? 1 : store.lists().last().position + 1;
+        Failures failures(store);
         created.id = store.put(created);
+        if (failures.any() || !created.id)
+            return failures.report("The list could not be saved");
         if (command.wantsJson())
             print({{"id", created.id}, {"name", created.name}, {"color", created.color}});
         else
@@ -568,7 +602,10 @@ int lists(const QStringList &arguments) {
             return fail(QString("%1 holds %2 reminders. Add --force to delete them with it.")
                             .arg(oneLine(doomed->name), QString::number(holding)));
         const QString removed = doomed->name;
+        Failures failures(store);
         store.removeList(doomed->id);
+        if (failures.any())
+            return failures.report("The list could not be deleted");
         if (command.wantsJson())
             print({{"deleted", removed}, {"reminders", holding}});
         else
@@ -656,7 +693,9 @@ int importAll(const QStringList &arguments) {
     Store store;
     if (!ready(store))
         return 1;
-    Store::Tx tx(&store);
+    Failures failures(store);
+    // One step for everything, committed before the count is told.
+    std::optional<Store::Tx> tx(std::in_place, &store);
     auto sectionIn = [&](qint64 listId, const QString &name) -> qint64 {
         if (name.isEmpty())
             return 0;
@@ -743,6 +782,9 @@ int importAll(const QStringList &arguments) {
             added += id != 0;
         }
     }
+    tx.reset();
+    if (failures.any())
+        return failures.report("Nothing was imported");
     if (command.wantsJson())
         print({{"imported", added}});
     else

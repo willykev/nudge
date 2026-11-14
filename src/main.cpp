@@ -10,9 +10,13 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSocketNotifier>
 #include <QTimer>
 #include <QUrl>
+#include <csignal>
 #include <cstdio>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "alerts.h"
 #include "backend.h"
@@ -21,6 +25,40 @@
 #include "store.h"
 #include "theme.h"
 #include "translator.h"
+
+namespace {
+
+// A signal handler may do next to nothing, so it only writes a byte for the
+// event loop to read.
+int stopSignal[2] = {-1, -1};
+
+void onStop(int) {
+    const char byte = 1;
+    [[maybe_unused]] const ssize_t written = ::write(stopSignal[1], &byte, 1);
+}
+
+// systemd stops the background service, and logging out stops the window,
+// with SIGTERM. Quitting through the event loop closes the window as a click
+// would, keeping a word being typed, and lets the Notifier take the buttons
+// off alerts that no process will answer any more.
+void quitOnStop(QCoreApplication &app) {
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, stopSignal) != 0)
+        return;
+    auto *stop = new QSocketNotifier(stopSignal[0], QSocketNotifier::Read, &app);
+    QObject::connect(stop, &QSocketNotifier::activated, &app, [] {
+        char byte;
+        [[maybe_unused]] const ssize_t drained = ::read(stopSignal[0], &byte, 1);
+        QCoreApplication::quit();
+    });
+    struct sigaction action = {};
+    action.sa_handler = onStop;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    for (const int signal : {SIGTERM, SIGINT, SIGHUP})
+        sigaction(signal, &action, nullptr);
+}
+
+} // namespace
 
 int main(int argc, char *argv[]) {
     // The environment as the session gave it, before Nudge sets its own
@@ -62,6 +100,7 @@ int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("nudge");
     app.setApplicationVersion(NUDGE_VERSION);
+    quitOnStop(app);
 
     // Matches the window to nudge.desktop, so the compositor (Wayland app_id)
     // and the launcher pick up the installed icon.

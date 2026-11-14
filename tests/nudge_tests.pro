@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 dbus sql testlib
+QT += core gui qml quick quickcontrols2 dbus sql network testlib
 CONFIG += c++20 testcase
 TARGET = nudge_tests
 TEMPLATE = app
