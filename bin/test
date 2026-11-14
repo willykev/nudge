@@ -1,14 +1,16 @@
 #!/bin/sh
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+# The tree's real path, symlinks resolved, which is how qmake sees it.
+ROOT="$(CDPATH= cd -P -- "$(dirname -- "$0")/.." && pwd -P)"
 mkdir -p "$ROOT/build/tests"
 cd "$ROOT/build/tests"
 
 # Without a cache file of its own, qmake runs any .qmake.conf, .qmake.cache,
 # .qmake.super or .qmake.stash it finds in a directory above the tree, such
-# as one another user left in /tmp. Pinning the cache here stops that search.
+# as one another user left in /tmp. Pinning the cache here stops that search,
+# given by its real path too, in case the build directory is a symlink.
 [ -e .qmake.cache ] || : > .qmake.cache
-qmake6 -cache "$ROOT/build/tests/.qmake.cache" "$ROOT/tests/nudge_tests.pro"
+qmake6 -cache "$(pwd -P)/.qmake.cache" "$ROOT/tests/nudge_tests.pro"
 make -s -j"$(nproc)"
 QT_QPA_PLATFORMTHEME=generic QT_QUICK_BACKEND=software QT_QPA_PLATFORM=offscreen ./nudge_tests "$@"
