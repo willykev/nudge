@@ -19,11 +19,15 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
 #include <functional>
 #include <optional>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace {
 
@@ -324,7 +328,11 @@ int add(const QStringList &arguments) {
     r.due = entry.due;
     r.dueMinutes = entry.minutes;
     r.repeat = entry.repeat;
-    r.tags = entry.tags;
+    // A tag written twice is one tag, as quick entry in the window keeps it.
+    // Not readTags, which would split one such as #home,office.
+    for (const QString &tag : entry.tags)
+        if (!r.tags.contains(tag, Qt::CaseInsensitive))
+            r.tags << tag;
     r.priority = entry.priority;
     r.listId = store.defaultListId();
     r.position = store.endPosition(r.listId);
@@ -438,12 +446,18 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
     if (!ready(store))
         return 1;
     QVector<qint64> ids;
+    // Titles are read before anything is done: deleting a parent takes its
+    // subtasks with it, so one listed after it is gone by its turn.
+    QHash<qint64, QString> titles;
     for (const QString &word : command.arguments()) {
         const qint64 id = word.toLongLong();
-        if (!store.reminder(id))
+        const Reminder *r = store.reminder(id);
+        if (!r)
             return fail("There is no reminder " + word + ". Nothing was changed.");
-        if (!ids.contains(id))
+        if (!ids.contains(id)) {
             ids << id;
+            titles.insert(id, r->title);
+        }
     }
     QJsonArray changed;
     QStringList lines;
@@ -451,7 +465,7 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
     {
         Store::Tx tx(&store);
         for (qint64 id : ids) {
-            const QString title = store.reminder(id) ? store.reminder(id)->title : QString();
+            const QString title = titles.value(id);
             lines << QString("%1 %2: %3").arg(verb, QString::number(id), oneLine(title));
             action(store, id);
             if (const Reminder *r = store.reminder(id))
@@ -969,4 +983,43 @@ int runDaemon(const QProcessEnvironment &session) {
     });
     notifier.start();
     return QCoreApplication::exec();
+}
+
+namespace {
+
+// A signal handler may do next to nothing, so it only writes a byte for the
+// event loop to read.
+int stopSignal[2] = {-1, -1};
+
+void onStop(int) {
+    const char byte = 1;
+    [[maybe_unused]] const ssize_t written = ::write(stopSignal[1], &byte, 1);
+}
+
+} // namespace
+
+// systemd stops the background service, and logging out stops the window,
+// with SIGTERM. Quitting through the event loop closes the window as a click
+// would, keeping a word being typed, and lets the Notifier take the buttons
+// off alerts that no process will answer any more.
+void quitOnStop(QCoreApplication &app) {
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, stopSignal) != 0)
+        return;
+    auto *stop = new QSocketNotifier(stopSignal[0], QSocketNotifier::Read, &app);
+    QObject::connect(stop, &QSocketNotifier::activated, &app, [] {
+        char byte;
+        [[maybe_unused]] const ssize_t drained = ::read(stopSignal[0], &byte, 1);
+        QCoreApplication::quit();
+    });
+    struct sigaction action = {};
+    action.sa_handler = onStop;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    for (const int signal : {SIGTERM, SIGINT, SIGHUP}) {
+        struct sigaction old;
+        // One it was started ignoring stays ignored: nohup and a script's background jobs ask for that.
+        if (sigaction(signal, nullptr, &old) == 0 && old.sa_handler == SIG_IGN)
+            continue;
+        sigaction(signal, &action, nullptr);
+    }
 }

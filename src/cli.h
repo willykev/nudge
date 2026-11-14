@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QCoreApplication>
 #include <QProcessEnvironment>
 #include <QString>
 #include <QStringList>
@@ -24,3 +25,7 @@ struct WindowLaunch {
     QProcessEnvironment environment;
 };
 WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun);
+
+// The window and the background service quit through the event loop on
+// SIGTERM, SIGINT and SIGHUP, except one they were started ignoring.
+void quitOnStop(QCoreApplication &app);

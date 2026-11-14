@@ -16,6 +16,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <csignal>
 #include <unistd.h>
 
 #include "alerts.h"
@@ -2501,6 +2502,80 @@ private slots:
         QCOMPARE(store.reminder(id)->title, QString("Milk"));
         QVERIFY(!store.reminder(id)->completed);
         QCOMPARE(store.lists().size(), 1);
+    }
+
+    // Started as `nohup nudge open &` from a script, the window keeps
+    // ignoring the hangup and interrupt it was started ignoring. Only how
+    // each signal is handled is looked at, and the test's own handling comes
+    // back afterwards, whatever happens here.
+    void aSignalIgnoredFromTheStartStaysIgnored() {
+        const int stops[] = {SIGTERM, SIGINT, SIGHUP};
+        struct sigaction saved[3];
+        for (int i = 0; i < 3; ++i)
+            QCOMPARE(sigaction(stops[i], nullptr, &saved[i]), 0);
+        const auto restore = qScopeGuard([&] {
+            for (int i = 0; i < 3; ++i)
+                sigaction(stops[i], &saved[i], nullptr);
+        });
+        std::signal(SIGTERM, SIG_DFL);
+        std::signal(SIGINT, SIG_IGN);
+        std::signal(SIGHUP, SIG_IGN);
+        quitOnStop(*QCoreApplication::instance());
+
+        struct sigaction now;
+        for (const int ignored : {SIGINT, SIGHUP}) {
+            QCOMPARE(sigaction(ignored, nullptr, &now), 0);
+            QVERIFY2(now.sa_handler == SIG_IGN, qPrintable(QString("signal %1").arg(ignored)));
+        }
+        // What it was not told to ignore still quits through the event loop.
+        QCOMPARE(sigaction(SIGTERM, nullptr, &now), 0);
+        QVERIFY(now.sa_handler != SIG_DFL && now.sa_handler != SIG_IGN);
+    }
+
+    void aTagWrittenTwiceIsOneTag() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        // As quick entry in the window has it: one tag, spelled as first written.
+        CliRun ran = cliRun(path, {"add", "Call #Home about #home stuff", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("tags").toVariant().toStringList(), QStringList{"Home"});
+        QCOMPARE(Store(path).reminder(cliJson(ran).value("id").toInteger())->tags, QStringList{"Home"});
+
+        // And a tag is the word the window takes, commas and all.
+        ran = cliRun(path, {"add", "Errands #home,office", "--json"});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(cliJson(ran).value("tags").toVariant().toStringList(), QStringList{"home,office"});
+    }
+
+    void deletingAParentAndItsSubtaskNamesBoth() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store store(path);
+        const qint64 listId = addList(store, "Home");
+        auto withSubtask = [&](const QString &title, const QString &subtask) {
+            Reminder r;
+            r.listId = listId;
+            r.parentId = add(store, listId, title);
+            r.title = subtask;
+            r.position = store.endPosition(listId);
+            return QStringList{QString::number(r.parentId), QString::number(store.put(r))};
+        };
+        const QStringList trip = withSubtask("Trip", "Pack"), move = withSubtask("Move", "Hire a van");
+
+        // The subtask goes with its parent, before its own turn comes, and is
+        // still reported by name.
+        CliRun ran = cliRun(path, {"delete", trip[0], trip[1]});
+        QCOMPARE(ran.code, 0);
+        QCOMPARE(ran.out, QString("Deleted %1: Trip\nDeleted %2: Pack\n").arg(trip[0], trip[1]));
+
+        ran = cliRun(path, {"delete", move[0], move[1], "--json"});
+        QCOMPARE(ran.code, 0);
+        const QJsonArray gone = cliJson(ran).value("reminders").toArray();
+        QCOMPARE(gone.size(), 2);
+        QCOMPARE(gone.at(0).toObject().value("title").toString(), QString("Move"));
+        QCOMPARE(gone.at(1).toObject().value("title").toString(), QString("Hire a van"));
+        QVERIFY(gone.at(1).toObject().value("deleted").toBool());
+        QVERIFY(Store(path).reminders().isEmpty());
     }
 
     // ---- Alerts -------------------------------------------------------------------
