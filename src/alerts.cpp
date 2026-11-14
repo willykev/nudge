@@ -2,10 +2,12 @@
 
 #include "dates.h"
 
+#include <QCoreApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QDBusReply>
+#include <QDBusServiceWatcher>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -55,6 +57,9 @@ bool focusNudgeWindow() {
     return false;
 }
 
+// Alerts that cannot be changed once shown are left as they are.
+void Alerts::disarm(quint32, const QString &, const QString &) {}
+
 DesktopAlerts::DesktopAlerts(bool background, QObject *parent) : QObject(parent) {
     QDBusConnection bus = QDBusConnection::sessionBus();
     if (!bus.isConnected()) {
@@ -68,6 +73,10 @@ DesktopAlerts::DesktopAlerts(bool background, QObject *parent) : QObject(parent)
                                      background ? Bus::DontAllowReplacement : Bus::AllowReplacement);
     bus.connect(notifications, notificationsPath, notifications, "ActionInvoked", this,
                 SLOT(onActionInvoked(uint,QString)));
+    bus.connect(notifications, notificationsPath, notifications, "NotificationClosed", this,
+                SLOT(onNotificationClosed(uint,uint)));
+    auto *server = new QDBusServiceWatcher(notifications, bus, QDBusServiceWatcher::WatchForOwnerChange, this);
+    connect(server, &QDBusServiceWatcher::serviceOwnerChanged, this, &DesktopAlerts::onServerChanged);
 }
 
 bool DesktopAlerts::mayAlert() {
@@ -79,11 +88,27 @@ bool DesktopAlerts::mayAlert() {
 }
 
 quint32 DesktopAlerts::show(const QString &title, const QString &body, const QStringList &actions) {
+    const quint32 id = notify(title, body, actions, 0);
+    if (id)
+        m_open.insert(id);
+    return id;
+}
+
+void DesktopAlerts::disarm(quint32 id, const QString &title, const QString &body) {
+    // Only one still on screen: a server given an id it no longer has shows
+    // the alert anew, and one the user dismissed would be back.
+    if (m_open.remove(id))
+        notify(title, body, {}, id);
+}
+
+quint32 DesktopAlerts::notify(const QString &title, const QString &body, const QStringList &actions,
+                              quint32 replaces) {
     QDBusMessage call = QDBusMessage::createMethodCall(notifications, notificationsPath, notifications, "Notify");
     const QVariantMap hints{{"desktop-entry", QStringLiteral("nudge")}, {"urgency", QVariant::fromValue<uchar>(1)}};
     // A reminder stays until it is dealt with: one that fades after five
     // seconds reminds nobody who stepped away.
-    call.setArguments({QStringLiteral("Nudge"), uint(0), QStringLiteral("nudge"), title, body, actions, hints, int(0)});
+    call.setArguments({QStringLiteral("Nudge"), uint(replaces), QStringLiteral("nudge"), title, body, actions, hints,
+                       int(0)});
     const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
     if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty()) {
         m_problem = tr("The desktop did not accept a notification: %1").arg(reply.errorMessage());
@@ -93,8 +118,38 @@ quint32 DesktopAlerts::show(const QString &title, const QString &body, const QSt
     return reply.arguments().first().toUInt();
 }
 
+// Asked once of each notification server. One that cannot say is sent plain
+// text, which every server shows as it is.
+bool DesktopAlerts::bodyMarkup() {
+    if (!m_markup) {
+        const QDBusReply<QStringList> capabilities = QDBusConnection::sessionBus().call(
+            QDBusMessage::createMethodCall(notifications, notificationsPath, notifications, "GetCapabilities"),
+            QDBus::Block, 3000);
+        m_markup = capabilities.isValid() && capabilities.value().contains("body-markup");
+    }
+    return *m_markup;
+}
+
 void DesktopAlerts::onActionInvoked(uint id, const QString &action) {
     emit acted(id, action);
+}
+
+void DesktopAlerts::onNotificationClosed(uint id, uint) {
+    if (m_open.remove(id))
+        emit closed(id);
+}
+
+// A notification server that quits takes every alert on screen with it, and
+// the next one counts its ids from the start again, so ours would come to
+// name other apps' notifications. It may read the body differently, too.
+void DesktopAlerts::onServerChanged(const QString &, const QString &oldOwner, const QString &) {
+    m_markup.reset();
+    if (oldOwner.isEmpty())
+        return;
+    const QSet<quint32> gone = m_open;
+    m_open.clear();
+    for (quint32 id : gone)
+        emit closed(id);
 }
 
 Notifier::Notifier(Store *store, Alerts *alerts, QObject *parent) : QObject(parent), m_store(store), m_alerts(alerts) {
@@ -107,6 +162,11 @@ Notifier::Notifier(Store *store, Alerts *alerts, QObject *parent) : QObject(pare
     QDBusConnection::systemBus().connect("org.freedesktop.login1", "/org/freedesktop/login1",
                                          "org.freedesktop.login1.Manager", "PrepareForSleep", this,
                                          SLOT(onPrepareForSleep(bool)));
+    // The buttons on an alert are answered here and nowhere else: they go
+    // when the process quits, and are let go once the alert leaves the screen.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &Notifier::disarm);
+    if (auto *desktop = dynamic_cast<DesktopAlerts *>(alerts))
+        connect(desktop, &DesktopAlerts::closed, this, &Notifier::forget);
 }
 
 void Notifier::onPrepareForSleep(bool sleeping) {
@@ -154,6 +214,11 @@ void Notifier::check(const QDateTime &now) {
 
     if (!pending.isEmpty() && m_alerts->mayAlert()) {
         const QDate today = now.date();
+        // Where the desktop reads the body as markup, a & or < in a title, a
+        // list name or a note would be taken for markup of its own. Nothing in
+        // the body is meant as markup, so there all of it is escaped.
+        const bool markup = m_alerts->bodyMarkup();
+        auto asBody = [markup](const QString &text) { return markup ? text.toHtmlEscaped() : text; };
         auto mark = [&](const Pending &p) {
             const Reminder *r = m_store->reminder(p.id);
             const qint64 dueAt = r->dueAt();
@@ -167,10 +232,11 @@ void Notifier::check(const QDateTime &now) {
                 titles << m_store->reminder(pending[i].id)->title;
             if (pending.size() > 5)
                 titles << QStringLiteral("…");
-            const quint32 shown = m_alerts->show(tr("%n reminders are due", "", pending.size()), titles.join('\n'),
-                                                 {"default", tr("Open")});
+            const QString title = tr("%n reminders are due", "", pending.size());
+            const QString body = asBody(titles.join('\n'));
+            const quint32 shown = m_alerts->show(title, body, {"default", tr("Open")});
             if (shown) {
-                m_shown.insert(shown, 0);
+                m_shown.insert(shown, {0, {}, -1, title, body});
                 for (const Pending &p : pending)
                     mark(p);
             }
@@ -186,12 +252,14 @@ void Notifier::check(const QDateTime &now) {
                     text = tr("Coming up: %1").arg(text);
                 if (!r->notes.isEmpty())
                     text += '\n' + r->notes.section('\n', 0, 0);
+                text = asBody(text);
+                const QString title = r->title.isEmpty() ? tr("Reminder") : r->title;
                 const quint32 shown =
-                    m_alerts->show(r->title.isEmpty() ? tr("Reminder") : r->title, text,
+                    m_alerts->show(title, text,
                                    {"default", tr("Open"), "done", tr("Complete"), "hour", tr("In an Hour"),
                                     "tomorrow", tr("Tomorrow")});
                 if (shown) {
-                    m_shown.insert(shown, p.id);
+                    m_shown.insert(shown, {p.id, r->due, r->dueMinutes, title, text});
                     mark(p);
                 }
             }
@@ -207,14 +275,21 @@ void Notifier::check(const QDateTime &now) {
 void Notifier::act(quint32 notification, const QString &action, const QDateTime &now) {
     if (!m_shown.contains(notification))
         return;
-    const qint64 id = m_shown.value(notification);
+    const Shown shown = m_shown.value(notification);
+    const qint64 id = shown.id;
     if (action == "default") {
         emit opened(id);
         return;
     }
     m_shown.remove(notification);
+    // The buttons answer for the moment the alert announced. Once that was
+    // dealt with some other way (the reminder completed, given another date
+    // or deleted, or a repeat gone on to its next date), a late click must
+    // not complete or snooze what comes after it. Another process may have
+    // dealt with it a moment ago, so what is on disk decides.
+    m_store->reloadIfChanged();
     const Reminder *r = m_store->reminder(id);
-    if (!r)
+    if (!r || r->completed || r->due != shown.due || r->dueMinutes != shown.dueMinutes)
         return;
     if (action == "done") {
         m_store->complete(id, now);
@@ -225,4 +300,18 @@ void Notifier::act(quint32 notification, const QString &action, const QDateTime 
         m_store->setAlerted(id, r->alertedDue, r->alertedEarly, morning.toSecsSinceEpoch());
     }
     check(now);
+}
+
+void Notifier::forget(quint32 notification) {
+    m_shown.remove(notification);
+}
+
+// Nothing answers the buttons on this process's alerts once it has quit, and
+// without the background service nothing else ever will. So as it quits,
+// each alert it still has on screen is shown again without them: what came
+// due stays in sight until it is dealt with, and no button is left dead.
+void Notifier::disarm() {
+    for (auto it = m_shown.cbegin(); it != m_shown.cend(); ++it)
+        m_alerts->disarm(it.key(), it->title, it->body);
+    m_shown.clear();
 }

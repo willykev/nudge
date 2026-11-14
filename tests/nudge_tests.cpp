@@ -41,10 +41,16 @@ public:
         sent.append({title, body, actions});
         return quint32(sent.size());
     }
+    void disarm(quint32 id, const QString &title, const QString &body) override {
+        disarmed.insert(id, {title, body, {}});
+    }
+    bool bodyMarkup() override { return markup; }
     bool mayAlert() override { return allowed; }
 
     QVector<Sent> sent;
+    QMap<quint32, Sent> disarmed; // shown again in place, without buttons
     bool allowed = true;
+    bool markup = false; // whether the desktop reads the body as markup
 };
 
 qint64 addList(Store &store, const QString &name) {
@@ -2517,6 +2523,235 @@ private slots:
         notifier.check(QDateTime(QDate(2030, 5, 1), QTime(9, 0)));
         QCOMPARE(alerts.sent.size(), 0);
         QCOMPARE(store.reminder(id)->alertedDue, 0); // left for the one that does alert
+    }
+
+    // ---- alerts (review fixes) ----
+
+private:
+    // A reminder that comes back every day at the time of `at`.
+    static qint64 addDaily(Store &store, const QString &title, const QDateTime &at) {
+        Reminder r;
+        r.listId = addList(store, "Home");
+        r.title = title;
+        r.due = at.date();
+        r.dueMinutes = at.time().hour() * 60 + at.time().minute();
+        r.repeat = "daily:1";
+        return store.put(r);
+    }
+
+    static int completedCopies(const Store &store, const QString &title) {
+        int count = 0;
+        for (const Reminder &r : store.reminders())
+            count += r.completed && r.title == title;
+        return count;
+    }
+
+private slots:
+    // An alert left on screen answers for the moment it announced. Completed
+    // in the window since, a daily reminder has moved on to tomorrow, and a
+    // late Complete on the alert must not complete tomorrow's as well.
+    void aLateCompleteLeavesTheNextRepeatAlone() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const QDateTime eight(QDate(2030, 5, 1), QTime(8, 0));
+        const qint64 id = addDaily(store, "Take pills", eight);
+        notifier.check(eight);
+        QCOMPARE(alerts.sent.size(), 1);
+
+        store.complete(id, eight.addSecs(5 * 60)); // in the window
+        QCOMPARE(store.reminder(id)->due, QDate(2030, 5, 2));
+        notifier.act(1, "done", eight.addSecs(10 * 60));
+        QCOMPARE(store.reminder(id)->due, QDate(2030, 5, 2));
+        QCOMPARE(completedCopies(store, "Take pills"), 1);
+    }
+
+    // Nor does a late In an Hour or Tomorrow snooze tomorrow's.
+    void aLateSnoozeLeavesTheNextRepeatAlone() {
+        for (const QString action : {"hour", "tomorrow"}) {
+            QTemporaryDir dir;
+            Store store(dir.filePath("nudge.db"));
+            FakeAlerts alerts;
+            Notifier notifier(&store, &alerts);
+            const QDateTime eight(QDate(2030, 5, 1), QTime(8, 0));
+            const qint64 id = addDaily(store, "Take pills", eight);
+            notifier.check(eight);
+            store.complete(id, eight.addSecs(5 * 60));
+
+            notifier.act(1, action, eight.addSecs(10 * 60));
+            QCOMPARE(store.reminder(id)->snoozeUntil, 0);
+            notifier.check(QDateTime(QDate(2030, 5, 2), QTime(7, 59)));
+            QCOMPARE(alerts.sent.size(), 1);
+        }
+    }
+
+    // The same goes for a reminder given another time since, or deleted;
+    // the alert for its new time answers as before.
+    void aLateClickOnAMovedOrDeletedReminderDoesNothing() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const qint64 listId = addList(store, "Home");
+        const qint64 id = add(store, listId, "Call the dentist", QDate(2030, 5, 1), 9 * 60);
+        const QDateTime nine(QDate(2030, 5, 1), QTime(9, 0));
+        notifier.check(nine);
+        QCOMPARE(alerts.sent.size(), 1);
+
+        Reminder later = *store.reminder(id);
+        later.dueMinutes = 11 * 60;
+        store.put(later);
+        notifier.act(1, "done", nine.addSecs(60));
+        QVERIFY(!store.reminder(id)->completed);
+        notifier.check(nine.addSecs(2 * 3600));
+        QCOMPARE(alerts.sent.size(), 2);
+        notifier.act(2, "done", nine.addSecs(2 * 3600 + 60));
+        QVERIFY(store.reminder(id)->completed);
+
+        const qint64 gone = add(store, listId, "Water the plants", QDate(2030, 5, 1), 12 * 60);
+        notifier.check(nine.addSecs(3 * 3600));
+        QCOMPARE(alerts.sent.size(), 3);
+        store.removeReminder(gone);
+        notifier.act(3, "hour", nine.addSecs(3 * 3600 + 60));
+        QVERIFY(!store.reminder(gone));
+        QCOMPARE(store.reminders().size(), 1);
+    }
+
+    // Undone in the window, the moment is the alert's again, and so are its
+    // buttons.
+    void anUndoneCompletionGivesTheAlertItsButtonsBack() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const QDateTime eight(QDate(2030, 5, 1), QTime(8, 0));
+        const qint64 id = addDaily(store, "Take pills", eight);
+        notifier.check(eight);
+        store.complete(id, eight.addSecs(5 * 60));
+        store.undo();
+        QCOMPARE(store.reminder(id)->due, QDate(2030, 5, 1));
+
+        notifier.act(1, "done", eight.addSecs(10 * 60));
+        QCOMPARE(store.reminder(id)->due, QDate(2030, 5, 2));
+        QCOMPARE(completedCopies(store, "Take pills"), 1);
+    }
+
+    // With the background service on, the alert is the service's while the
+    // completing may be the window's: a click is weighed against what the
+    // window wrote, not against what the service last heard of it.
+    void aLateClickSeesWhatAnotherProcessDid() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store service(path), window(path);
+        FakeAlerts alerts;
+        Notifier notifier(&service, &alerts);
+        const QDateTime eight(QDate(2030, 5, 1), QTime(8, 0));
+        const qint64 id = addDaily(service, "Take pills", eight);
+        notifier.check(eight);
+        QCOMPARE(alerts.sent.size(), 1);
+
+        QVERIFY(window.reloadIfChanged());
+        window.complete(id, eight.addSecs(5 * 60));
+        notifier.act(1, "done", eight.addSecs(10 * 60));
+        const Store disk(path);
+        QCOMPARE(disk.reminder(id)->due, QDate(2030, 5, 2));
+        QCOMPARE(completedCopies(disk, "Take pills"), 1);
+    }
+
+    // An alert that has left the screen has no buttons left. Its id is the
+    // desktop's to give out again: after the notification server restarts,
+    // it names another app's notification.
+    void aClickOnAnAlertThatLeftTheScreenIsNotOurs() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const qint64 id = add(store, addList(store, "Home"), "Call the dentist", QDate(2030, 5, 1), 9 * 60);
+        const QDateTime nine(QDate(2030, 5, 1), QTime(9, 0));
+        notifier.check(nine);
+        notifier.forget(1);
+
+        QSignalSpy opened(&notifier, &Notifier::opened);
+        notifier.act(1, "default", nine.addSecs(60));
+        notifier.act(1, "done", nine.addSecs(60));
+        QCOMPARE(opened.count(), 0);
+        QVERIFY(!store.reminder(id)->completed);
+    }
+
+    // Only the process that showed an alert answers its buttons. Without the
+    // background service that is the window, so as it quits, each alert it
+    // still has on screen is shown again in its place without them: what
+    // came due stays in sight, and no button is left that nothing answers.
+    void quittingTakesTheButtonsOffItsAlerts() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        const qint64 listId = addList(store, "Home");
+        add(store, listId, "Call the dentist", QDate(2030, 5, 1), 9 * 60);
+        add(store, listId, "Water the plants", QDate(2030, 5, 1), 9 * 60);
+        notifier.check(QDateTime(QDate(2030, 5, 1), QTime(9, 0)));
+        QCOMPARE(alerts.sent.size(), 2);
+        notifier.forget(1); // dismissed, so not to be shown again
+
+        notifier.disarm();
+        QCOMPARE(alerts.disarmed.keys(), QList<quint32>{2});
+        QCOMPARE(alerts.disarmed[2].title, alerts.sent[1].title);
+        QCOMPARE(alerts.disarmed[2].body, alerts.sent[1].body);
+        notifier.disarm();
+        QCOMPARE(alerts.disarmed.size(), 1);
+    }
+
+    // A desktop that reads the body as markup would take a & or < in a list
+    // name, a title or a note for markup of its own, so there the body is
+    // escaped. One that shows the body as it is would show the escapes, so
+    // there it is not. The title is never markup.
+    void alertBodiesAreEscapedWhereTheyAreMarkup() {
+        for (const bool markup : {true, false}) {
+            QTemporaryDir dir;
+            Store store(dir.filePath("nudge.db"));
+            FakeAlerts alerts;
+            alerts.markup = markup;
+            Notifier notifier(&store, &alerts);
+            Reminder r;
+            r.listId = addList(store, "Tom & Jerry");
+            r.title = "Cards <3";
+            r.notes = "Ask for \"Love & Co\" <first>\nthen the rest";
+            r.due = QDate(2030, 5, 1);
+            r.dueMinutes = 9 * 60;
+            store.put(r);
+            notifier.check(QDateTime(QDate(2030, 5, 1), QTime(9, 0)));
+            QCOMPARE(alerts.sent.size(), 1);
+            QCOMPARE(alerts.sent[0].title, QString("Cards <3"));
+            const QString body = alerts.sent[0].body;
+            if (markup) {
+                QVERIFY2(body.contains(" · Tom &amp; Jerry\n"), qPrintable(body));
+                QVERIFY2(body.endsWith("\nAsk for &quot;Love &amp; Co&quot; &lt;first&gt;"), qPrintable(body));
+            } else {
+                QVERIFY2(body.contains(" · Tom & Jerry\n"), qPrintable(body));
+                QVERIFY2(body.endsWith("\nAsk for \"Love & Co\" <first>"), qPrintable(body));
+            }
+        }
+    }
+
+    // The titles listed in a pile are body too.
+    void aPileOfTitlesIsEscapedWhereItIsMarkup() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        FakeAlerts alerts;
+        alerts.markup = true;
+        Notifier notifier(&store, &alerts);
+        const qint64 listId = addList(store, "Home");
+        const QStringList titles{"Fish & chips", "<3 Mom", "a > b", "Plain"};
+        for (const QString &title : titles)
+            add(store, listId, title, QDate(2030, 5, 1), 9 * 60);
+        notifier.check(QDateTime(QDate(2030, 5, 1), QTime(12, 0)));
+        QCOMPARE(alerts.sent.size(), 1);
+        QCOMPARE(alerts.sent[0].title, QString("4 reminders are due"));
+        QStringList lines = alerts.sent[0].body.split('\n');
+        lines.sort();
+        QCOMPARE(lines, QStringList({"&lt;3 Mom", "Fish &amp; chips", "Plain", "a &gt; b"}));
     }
 
     // ---- The window itself ----------------------------------------------------------
