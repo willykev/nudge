@@ -412,6 +412,44 @@ private slots:
         QCOMPARE(Dates::parseDate("29/2", today), QDate(2028, 2, 29));
     }
 
+    void aTwentyFourHourClockKeepsItsMornings() {
+        // Where the clock has 24 hours, 7:30 is half past seven in the morning.
+        QLocale::setDefault(QLocale(QLocale::German, QLocale::Germany));
+        QCOMPARE(Dates::parseTime("7:30"), 7 * 60 + 30);
+        QuickEntry entry = typedAt("Zug 6:45 tomorrow", 10);
+        QCOMPARE(entry.title, QString("Zug"));
+        QCOMPARE(entry.due, QDate(2026, 11, 14));
+        QCOMPARE(entry.minutes, 6 * 60 + 45);
+        // An hour on its own is the afternoon there too, as it always was.
+        QCOMPARE(Dates::parseTime("5"), 17 * 60);
+        QCOMPARE(typedAt("Call at 5", 10).minutes, 17 * 60);
+        // Tonight is still the evening ahead, and its small hours the next day.
+        entry = typedAt("Call mom tonight at 9:30", 19);
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 21 * 60 + 30);
+        QCOMPARE(typedAt("Call mom tonight at 5:30", 10).minutes, 17 * 60 + 30);
+        entry = typedAt("Check the oven tonight at 1:30", 19);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 60 + 30);
+
+        // Where it has twelve, "at 5:30" is the afternoon, as "at 5" is.
+        QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
+        QCOMPARE(typedAt("meeting at 5:30", 10).minutes, 17 * 60 + 30);
+        QCOMPARE(Dates::parseTime("7:30"), 19 * 60 + 30);
+    }
+
+    void aTimeReadsBackAsItIsShown() {
+        // The time field shows a time the locale's way, "5:30" in Japanese and
+        // Czech for half past five in the morning, and reads it back unchanged.
+        for (const char *name : {"de_DE", "ja_JP", "cs_CZ", "en_US", "es_MX", "da_DK"}) {
+            QLocale::setDefault(QLocale(name));
+            for (int minutes = 0; minutes < 24 * 60; ++minutes) {
+                const QString shown = Dates::formatTime(minutes);
+                QVERIFY2(Dates::parseTime(shown) == minutes, qPrintable(QString(name) + ": " + shown));
+            }
+        }
+    }
+
     void tonightWithoutATimeIsStillAhead() {
         // Once eight has gone by, tonight is the next hour on the clock...
         QuickEntry entry = typedAt("Movie tonight", 21, 30);

@@ -76,6 +76,13 @@ struct Time {
     bool guessed = false; // morning or afternoon was a guess: "at 9", "at 5:30"
 };
 
+// Whether the locale writes its times with am and pm. Quoted text in the
+// format is written as it stands, so an "a" there does not count.
+bool twelveHourClock() {
+    static const QRegularExpression quoted("'[^']*'");
+    return QLocale().timeFormat(QLocale::ShortFormat).remove(quoted).contains(u'a', Qt::CaseInsensitive);
+}
+
 Time timeAt(const QStringList &words, int index) {
     const QString word = words.value(index);
     if (word == "noon" || word == "midday")
@@ -115,10 +122,12 @@ Time timeAt(const QStringList &words, int index) {
     }
     if (hour > 23)
         return {};
-    // "at 5" and "at 5:30" mean the afternoon, "at 9" the morning. An hour
-    // like 0, 17, or 05 is the 24-hour clock's and means what it says.
+    // "at 5" means the afternoon and "at 9" the morning. Where the clock has
+    // twelve hours "at 5:30" is the afternoon too; where it has 24, 5:30 is
+    // how the morning is written. An hour like 0, 17, or 05 is the 24-hour
+    // clock's and means what it says.
     const bool guessed = hour >= 1 && hour <= 12 && !match.captured(1).startsWith('0');
-    if (guessed && hour <= 7)
+    if (guessed && hour <= 7 && (!hasMinutes || twelveHourClock()))
         hour += 12;
     return {hour * 60 + minute, !hasMinutes, used, guessed};
 }
@@ -375,8 +384,13 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     // "tonight at 9" is 21:00 and "tonight at 12" midnight, and a time before
     // noon that has already gone by belongs to the night ahead.
     if (tonight && date == today) {
-        if (guessed && minutes < 17 * 60)
-            minutes += 12 * 60;
+        // "5:30" comes in as 17:30 on a 12-hour clock and as 5:30 on a 24-hour
+        // one, so the hour is read on the 12-hour clock: 5 to 11 are the
+        // evening, 12 midnight, and 1 to 4 the small hours.
+        if (guessed) {
+            const int hour = minutes / 60 % 12;
+            minutes = (hour >= 5 ? hour + 12 : hour) * 60 + minutes % 60;
+        }
         if (minutes >= 24 * 60)
             minutes -= 24 * 60;
         if (minutes < 12 * 60 && minutes <= nowMinutes)
