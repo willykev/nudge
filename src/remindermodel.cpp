@@ -162,10 +162,17 @@ QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &
                 Items items = bySection.value(sectionId);
                 std::sort(items.begin(), items.end(), order);
                 for (const Reminder *r : items) {
-                    if (!shown(*r))
-                        continue;
                     Items subtasks = children.value(r->id);
                     std::sort(subtasks.begin(), subtasks.end(), order);
+                    if (!shown(*r)) {
+                        // Out of sight goes what it holds, except a subtask still
+                        // open: that shows on its own, in its place, so nothing
+                        // left to do drops out of the list.
+                        for (const Reminder *subtask : subtasks)
+                            if (shown(*subtask))
+                                listRows.append(item(subtask));
+                        continue;
+                    }
                     Row row = item(r);
                     row.children = subtasks.size();
                     row.collapsed = options.collapsed.contains(r->id);
@@ -367,7 +374,10 @@ QVariant ReminderModel::data(const QModelIndex &index, int role) const {
     case LinkRole: return r ? linkLabel(r->url) : QString();
     case ListNameRole: return r && list && m_namesLists ? list->name : QString();
     case ParentTitleRole: {
-        const Reminder *parent = r && r->parentId && m_namesLists ? m_store->reminder(r->parentId) : nullptr;
+        // Away from its parent, a subtask says whose it is: in a view gathered
+        // from everywhere, or on its own in a list while its parent is hidden.
+        const Reminder *parent =
+            r && r->parentId && (m_namesLists || row.depth == 0) ? m_store->reminder(r->parentId) : nullptr;
         return parent ? parent->title : QString();
     }
     }
@@ -498,13 +508,19 @@ QString ReminderModel::describeRepeat(const QString &rule) {
     return {};
 }
 
-// A link shows as the site it leads to.
+// A link shows as the site it leads to. Any other kind says what kind it is
+// too (claude://claude.ai), so it never passes for a web page.
 QString ReminderModel::linkLabel(const QString &url) {
     const QString text = url.trimmed();
     if (text.isEmpty())
         return {};
-    QString host = QUrl::fromUserInput(text).host();
+    const QUrl link = QUrl::fromUserInput(text);
+    QString host = link.host();
+    if (host.isEmpty())
+        return text;
+    if (link.scheme() != "http" && link.scheme() != "https")
+        return link.scheme() + "://" + host;
     if (host.startsWith("www."))
         host.remove(0, 4);
-    return host.isEmpty() ? text : host;
+    return host;
 }

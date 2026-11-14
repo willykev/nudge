@@ -33,7 +33,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoChanged)
     Q_PROPERTY(QVariantList lists READ lists NOTIFY listsChanged)
-    Q_PROPERTY(QVariantList sections READ sections NOTIFY listsChanged)
+    Q_PROPERTY(QVariantList sections READ sections NOTIFY sectionsChanged)
     Q_PROPERTY(QStringList palette READ palette CONSTANT)
     Q_PROPERTY(QString problem READ problem NOTIFY problemChanged)
     Q_PROPERTY(bool backgroundAvailable READ backgroundAvailable NOTIFY backgroundChanged)
@@ -152,6 +152,7 @@ signals:
     void draftChanged();
     void undoChanged();
     void listsChanged();
+    void sectionsChanged();
     void problemChanged();
     void backgroundChanged();
     void notice(const QString &text); // something worth a passing word
@@ -167,6 +168,8 @@ private:
     void selectNear(int row);
     void rememberSelection();
     bool edit(qint64 id, const QString &what, const std::function<void(Reminder &)> &change);
+    QString stepKey(qint64 id, const QString &key = {}) const;
+    QVector<qint64> completedInView() const;
     double positionAfter(const Reminder &reminder) const;
     double positionBefore(const Reminder &reminder) const;
     void spread(qint64 listId);
@@ -184,7 +187,8 @@ private:
     View m_view;
     View m_viewBeforeSearch;
     QString m_search;
-    QString m_title, m_color;
+    QString m_title, m_color, m_sort;
+    QVariantList m_sections;
     bool m_showCompleted = false;
     int m_openCount = 0;
     qint64 m_selectedId = 0;

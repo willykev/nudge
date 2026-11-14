@@ -56,12 +56,20 @@ Backend::Backend(Store *store, QObject *parent)
     connect(m_store, &Store::changed, this, [this] { refresh(); });
     connect(m_store, &Store::undoChanged, this, &Backend::undoChanged);
     connect(m_store, &Store::failed, this, &Backend::problemChanged);
+    // A change the file refused is said once the action is over, so the word
+    // the action has for success does not cover it up.
+    connect(
+        m_store, &Store::failed, this,
+        [this](const QString &message) { emit notice(tr("Nudge could not save a change: %1").arg(message)); },
+        Qt::QueuedConnection);
 
     // A reminder left without a title is one the app never got to finish
-    // (it was killed mid-word), not something to be reminded of.
+    // (it was killed mid-word), not something to be reminded of. One touched
+    // in the last few minutes may be another window's, still being typed.
+    const qint64 settled = now().toSecsSinceEpoch() - 10 * 60;
     QVector<qint64> blank;
     for (const Reminder &r : m_store->reminders())
-        if (r.title.isEmpty() && r.notes.isEmpty() && m_store->childrenOf(r.id).isEmpty())
+        if (r.title.isEmpty() && r.notes.isEmpty() && r.modifiedAt < settled && m_store->childrenOf(r.id).isEmpty())
             blank.append(r.id);
     if (!blank.isEmpty()) {
         m_store->removeReminders(blank);
@@ -161,6 +169,11 @@ void Backend::refresh(bool reset) {
         selectNear(qMax(0, row));
 
     updateSidebar();
+    // A tag's view is written the way its entry is, so the two stay one.
+    if (m_view.kind == View::Tag)
+        for (const SidebarEntry &entry : m_sidebar->entries())
+            if (entry.group == "tags" && entry.name.toLower() == m_view.text.toLower())
+                m_view.text = entry.name;
 
     int open = 0;
     for (const Row &shown : m_model->rows()) {
@@ -176,10 +189,18 @@ void Backend::refresh(bool reset) {
         m_sectionsSeen = m_store->sections();
         emit listsChanged();
     }
-    const QString title = viewTitle(), color = viewColor();
-    if (viewMoved || title != m_title || color != m_color) {
+    // The sections on offer and the sort are the list on screen's, so they
+    // change with the view and with an undo as much as with the store.
+    const QVariantList sections = this->sections();
+    if (sections != m_sections) {
+        m_sections = sections;
+        emit sectionsChanged();
+    }
+    const QString title = viewTitle(), color = viewColor(), sort = sortMode();
+    if (viewMoved || title != m_title || color != m_color || sort != m_sort) {
         m_title = title;
         m_color = color;
+        m_sort = sort;
         emit viewChanged();
     }
     rememberSelection();
@@ -198,7 +219,7 @@ void Backend::updateSidebar() {
     const QDate today = now().date();
     int dueToday = 0, scheduled = 0, open = 0, flagged = 0;
     QHash<qint64, int> perList;
-    QMap<QString, QPair<QString, int>> tags; // by lowercase name: how it is written, and how often
+    QMap<QString, QMap<QString, int>> tags; // by lowercase name: each way it is written, and how often
     for (const Reminder &r : m_store->reminders()) {
         if (r.completed)
             continue;
@@ -209,12 +230,8 @@ void Backend::updateSidebar() {
             dueToday += r.due <= today;
         }
         flagged += r.flagged;
-        for (const QString &tag : r.tags) {
-            auto &entry = tags[tag.toLower()];
-            if (entry.first.isEmpty())
-                entry.first = tag;
-            ++entry.second;
-        }
+        for (const QString &tag : r.tags)
+            ++tags[tag.toLower()][tag];
     }
 
     QVector<SidebarEntry> entries{
@@ -227,8 +244,20 @@ void Backend::updateSidebar() {
     for (const TaskList &list : m_store->lists())
         entries.append({"list:" + QString::number(list.id), "lists", list.name, list.color, "list",
                         perList.value(list.id)});
-    for (auto it = tags.cbegin(); it != tags.cend(); ++it)
-        entries.append({"tag:" + it->first, "tags", it->first, "", "tag", it->second});
+    for (const QMap<QString, int> &spellings : std::as_const(tags)) {
+        // A tag goes by the way most reminders write it, and on a tie by the
+        // one that sorts first, so its entry is the same from launch to launch.
+        QString name;
+        int most = 0, count = 0;
+        for (auto it = spellings.cbegin(); it != spellings.cend(); ++it) {
+            count += it.value();
+            if (it.value() > most) {
+                most = it.value();
+                name = it.key();
+            }
+        }
+        entries.append({"tag:" + name, "tags", name, "", "tag", count});
+    }
     m_sidebar->show(entries);
 }
 
@@ -361,8 +390,9 @@ void Backend::setSelectedId(qint64 id) {
         return;
     m_selectedId = id;
     // Edits to another reminder are another step to undo. A reminder being
-    // added is still the same step until its title is in.
-    if (id != m_draftId)
+    // added is still the same step until its title is in, wherever the
+    // selection went in the meantime: naming it seals the step.
+    if (!m_draftId)
         m_store->sealUndo();
     emit selectedIdChanged();
     rememberSelection();
@@ -530,6 +560,11 @@ qint64 Backend::addReminder() {
         r.listId = selected ? selected->listId : fallback;
     if (!m_store->list(r.listId))
         r.listId = fallback;
+    // A finished reminder takes no new subtasks: beside one of its own, the
+    // new reminder goes below it instead, on its own.
+    if (const Reminder *parent = selected && selected->parentId ? m_store->reminder(selected->parentId) : nullptr;
+        parent && parent->completed && parent->listId == selected->listId)
+        selected = *parent;
 
     m_beforeDraft = m_selectedId;
     m_draftKey = QString("draft:%1").arg(++m_drafts);
@@ -576,10 +611,13 @@ void Backend::commitTitle(qint64 id, const QString &text) {
     emit draftChanged();
     if (title.isEmpty()) {
         // Nothing was typed, so nothing was added, and nothing is left to undo.
+        // The selection goes back to where it was, unless the window has
+        // already moved it on.
+        const bool selected = m_selectedId == id;
         m_store->discardLast(key);
         if (m_store->reminder(id))
             m_store->removeReminder(id);
-        if (m_store->reminder(m_beforeDraft) && m_model->rowOf(m_beforeDraft) >= 0)
+        if (selected && m_store->reminder(m_beforeDraft) && m_model->rowOf(m_beforeDraft) >= 0)
             setSelectedId(m_beforeDraft);
         return;
     }
@@ -635,9 +673,15 @@ bool Backend::edit(qint64 id, const QString &what, const std::function<void(Remi
     Reminder r = *existing;
     change(r);
     // Keystrokes in one field of one reminder undo together.
-    Store::Tx tx(m_store, what.isEmpty() ? QString() : QString("%1:%2").arg(what).arg(id));
+    Store::Tx tx(m_store, stepKey(id, what.isEmpty() ? QString() : QString("%1:%2").arg(what, QString::number(id))));
     m_store->put(r);
     return true;
+}
+
+// A change to a reminder still being added is part of adding it, so one
+// undo takes it all back.
+QString Backend::stepKey(qint64 id, const QString &key) const {
+    return id && id == m_draftId ? m_draftKey : key;
 }
 
 void Backend::toggleCompleted(qint64 id) {
@@ -650,8 +694,11 @@ void Backend::toggleCompleted(qint64 id) {
         return;
     }
     m_lingering.insert(id);
+    // Its subtasks still open are completed with it and stay as long; those
+    // done before stay out of sight.
     for (qint64 child : m_store->childrenOf(id))
-        m_lingering.insert(child);
+        if (!m_store->reminder(child)->completed)
+            m_lingering.insert(child);
     const QDate next = m_store->complete(id, now());
     if (next.isValid()) {
         m_lingering.remove(id);
@@ -720,7 +767,8 @@ void Backend::indent(qint64 id) {
         }
     }
     const Reminder *parent = m_store->reminder(parentId);
-    if (!parent || parent->listId != r->listId)
+    // A subtask showing on its own, with its parent out of sight, takes none.
+    if (!parent || parent->listId != r->listId || parent->parentId)
         return;
 
     double position = 0;
@@ -733,15 +781,29 @@ void Backend::indent(qint64 id) {
     const QVector<qint64> children = m_store->childrenOf(id);
     m_collapsed.remove(parentId);
 
-    Store::Tx tx(m_store);
-    m_store->put(moved);
-    for (qint64 childId : children) {
-        Reminder child = *m_store->reminder(childId);
-        child.parentId = parentId;
-        child.sectionId = moved.sectionId;
-        child.position = ++position;
-        m_store->put(child);
+    // Something left to do under a finished reminder means it is not
+    // finished after all.
+    bool open = !moved.completed;
+    for (qint64 childId : children)
+        open = open || !m_store->reminder(childId)->completed;
+    const bool reopen = open && parent->completed;
+    const QString parentTitle = parent->title;
+
+    {
+        Store::Tx tx(m_store, stepKey(id));
+        if (reopen)
+            m_store->reopen(parentId);
+        m_store->put(moved);
+        for (qint64 childId : children) {
+            Reminder child = *m_store->reminder(childId);
+            child.parentId = parentId;
+            child.sectionId = moved.sectionId;
+            child.position = ++position;
+            m_store->put(child);
+        }
     }
+    if (reopen)
+        emit notice(tr("Reopened “%1”: it has a subtask to do").arg(parentTitle));
 }
 
 void Backend::outdent(qint64 id) {
@@ -756,6 +818,7 @@ void Backend::outdent(qint64 id) {
     } else {
         moved.position = m_store->endPosition(r->listId);
     }
+    Store::Tx tx(m_store, stepKey(id));
     m_store->put(moved);
 }
 
@@ -839,7 +902,7 @@ void Backend::moveToList(qint64 id, qint64 listId) {
     moved.position = position;
     const QVector<qint64> children = m_store->childrenOf(id);
     {
-        Store::Tx tx(m_store);
+        Store::Tx tx(m_store, stepKey(id));
         m_store->put(moved);
         for (qint64 childId : children) {
             Reminder child = *m_store->reminder(childId);
@@ -854,14 +917,16 @@ void Backend::moveToList(qint64 id, qint64 listId) {
 
 void Backend::moveToSection(qint64 id, qint64 sectionId) {
     const Reminder *existing = m_store->reminder(id);
-    if (!existing || (sectionId && !m_store->section(sectionId)))
+    const Section *section = m_store->section(sectionId);
+    // Only a section of the reminder's own list will do, whatever a menu offered.
+    if (!existing || (sectionId && (!section || section->listId != existing->listId)))
         return;
     Reminder moved = *existing;
     moved.sectionId = sectionId;
     moved.parentId = 0;
     moved.position = m_store->endPosition(moved.listId);
     const QVector<qint64> children = m_store->childrenOf(id);
-    Store::Tx tx(m_store);
+    Store::Tx tx(m_store, stepKey(id));
     m_store->put(moved);
     for (qint64 childId : children) {
         Reminder child = *m_store->reminder(childId);
@@ -1114,18 +1179,49 @@ QString Backend::sectionName(qint64 id) const {
     return section ? section->name : QString();
 }
 
-int Backend::completedCount() const {
-    int count = 0;
+// What Delete Completed takes: the completed reminders the view holds, on
+// screen or not (all a list has done, or what Today, a tag, or a search has),
+// each with its subtasks. One with a subtask still open stays, so nothing
+// left to do loses what it belongs to.
+QVector<qint64> Backend::completedInView() const {
+    QVector<qint64> held;
+    if (m_view.kind == View::List) {
+        for (const Reminder &r : m_store->reminders())
+            if (r.completed && r.listId == m_view.listId)
+                held.append(r.id);
+    } else {
+        ViewOptions options;
+        options.now = now();
+        options.showCompleted = true;
+        for (const Row &row : buildRows(*m_store, m_view, options))
+            if (const Reminder *r = row.heading ? nullptr : m_store->reminder(row.id); r && r->completed)
+                held.append(r->id);
+    }
+    QHash<qint64, QVector<qint64>> children;
     for (const Reminder &r : m_store->reminders())
-        count += r.completed && (m_view.kind != View::List || r.listId == m_view.listId);
-    return count;
+        if (r.parentId)
+            children[r.parentId].append(r.id);
+    QSet<qint64> taken;
+    for (qint64 id : held) {
+        const QVector<qint64> subtasks = children.value(id);
+        if (std::any_of(subtasks.cbegin(), subtasks.cend(),
+                        [this](qint64 subtask) { return !m_store->reminder(subtask)->completed; }))
+            continue;
+        taken.insert(id);
+        for (qint64 subtask : subtasks)
+            taken.insert(subtask);
+    }
+    QVector<qint64> ids(taken.cbegin(), taken.cend());
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+int Backend::completedCount() const {
+    return completedInView().size();
 }
 
 void Backend::clearCompleted() {
-    QVector<qint64> ids;
-    for (const Reminder &r : m_store->reminders())
-        if (r.completed && (m_view.kind != View::List || r.listId == m_view.listId))
-            ids.append(r.id);
+    const QVector<qint64> ids = completedInView();
     if (ids.isEmpty())
         return;
     m_store->removeReminders(ids);

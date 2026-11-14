@@ -1470,11 +1470,460 @@ private slots:
         QTemporaryDir dir;
         Store store(dir.filePath("nudge.db"));
         const qint64 listId = addList(store, "Home");
-        add(store, listId, "");
+        age(store, add(store, listId, ""), 3600); // left by a window killed an hour ago
         add(store, listId, "Real");
         Backend backend(&store);
         QCOMPARE(store.reminders().size(), 1);
         QVERIFY(!store.canUndo());
+    }
+
+    // ---- backend (review fixes) ----
+
+private:
+    // Keeps a test's window away from the real systemd: there is no unit to ask about.
+    static void quiet(Backend &backend, const QTemporaryDir &dir) {
+        backend.setService(dir.filePath("systemctl"), dir.filePath("missing.service"));
+    }
+
+    // Runs SQL on the store's file from another connection, as another
+    // process would, and has the store read the file again.
+    static void behindTheStoresBack(Store &store, const QString &sql, const QVariantList &values = {}) {
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "elsewhere");
+            db.setDatabaseName(store.path());
+            QVERIFY(db.open());
+            QSqlQuery query(db);
+            QVERIFY(query.prepare(sql));
+            for (const QVariant &value : values)
+                query.addBindValue(value);
+            QVERIFY(query.exec());
+        }
+        QSqlDatabase::removeDatabase("elsewhere");
+        store.reloadIfChanged();
+    }
+
+    // Makes a reminder look as if it was last touched `seconds` ago.
+    static void age(Store &store, qint64 id, qint64 seconds) {
+        const qint64 then = QDateTime::currentSecsSinceEpoch() - seconds;
+        behindTheStoresBack(store, "UPDATE reminders SET created_at = ?, modified_at = ? WHERE id = ?",
+                            {then, then, id});
+    }
+
+    static QMetaMethod notifySignal(const QObject &object, const char *property) {
+        const QMetaObject *meta = object.metaObject();
+        return meta->property(meta->indexOfProperty(property)).notifySignal();
+    }
+
+    static bool showsRow(const QVector<Row> &rows, qint64 id) {
+        return std::any_of(rows.begin(), rows.end(), [id](const Row &row) { return !row.heading && row.id == id; });
+    }
+
+private slots:
+    void sectionsAndSortFollowTheView() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 home = addList(store, "Home"), work = addList(store, "Work");
+        Section section;
+        section.listId = home;
+        section.name = "Later";
+        const qint64 later = store.put(section);
+        const qint64 report = add(store, work, "Send the report");
+        backend.setViewKey("today");
+
+        // What Move to Section offers follows the view as it switches.
+        QSignalSpy sections(&backend, notifySignal(backend, "sections"));
+        backend.setViewKey("list:" + QString::number(home));
+        QCOMPARE(backend.sections().size(), 1);
+        QVERIFY(!sections.isEmpty());
+        sections.clear();
+        backend.setViewKey("list:" + QString::number(work));
+        QVERIFY(backend.sections().isEmpty());
+        QVERIFY(!sections.isEmpty());
+
+        // And another list's section is no place for a reminder.
+        backend.moveToSection(report, later);
+        QCOMPARE(store.reminder(report)->sectionId, 0);
+        QVERIFY(store.sections().size() == 1 && store.sections().first().listId == home);
+
+        // Undoing a sort says so, as making it did.
+        backend.setViewKey("list:" + QString::number(home));
+        QSignalSpy sort(&backend, notifySignal(backend, "sortMode"));
+        backend.cycleSort();
+        QCOMPARE(backend.sortMode(), QString("due"));
+        QVERIFY(!sort.isEmpty());
+        sort.clear();
+        backend.undo();
+        QCOMPARE(backend.sortMode(), QString("manual"));
+        QVERIFY(!sort.isEmpty());
+        sort.clear();
+        backend.redo();
+        QCOMPARE(backend.sortMode(), QString("due"));
+        QVERIFY(!sort.isEmpty());
+    }
+
+    void namingADraftAfterTheSelectionMovedIsStillOneStep() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 first = add(store, listId, "First");
+        backend.setViewKey("list:" + QString::number(listId));
+        backend.setSelectedId(first);
+
+        // A click on another row moves the selection before the title is in.
+        const qint64 id = backend.addReminder();
+        backend.setSelectedId(first);
+        backend.commitTitle(id, "Buy milk");
+        QVERIFY(store.reminder(id));
+        QCOMPARE(store.reminder(id)->title, QString("Buy milk"));
+        backend.undo();
+        QVERIFY(!store.reminder(id));
+        QCOMPARE(store.reminders().size(), 1);
+    }
+
+    void aDraftLeftEmptyAfterTheSelectionMovedLeavesNoTrace() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 first = add(store, listId, "First");
+        const qint64 last = add(store, listId, "Last");
+        backend.setViewKey("list:" + QString::number(listId));
+        backend.setSelectedId(first);
+        store.clearUndo();
+
+        const qint64 id = backend.addReminder();
+        backend.setSelectedId(last);
+        backend.commitTitle(id, "");
+        QVERIFY(!store.reminder(id));
+        QVERIFY(!store.canUndo());
+        QVERIFY(!store.canRedo());
+        QCOMPARE(backend.selectedId(), last); // where the click put it
+    }
+
+    void changesToADraftUndoWithIt() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        backend.setClock([] { return friday; });
+        const qint64 listId = addList(store, "Home");
+        const qint64 trip = add(store, listId, "Trip");
+        backend.setViewKey("list:" + QString::number(listId));
+        backend.setSelectedId(trip);
+        store.clearUndo();
+
+        // Tab while typing makes it a subtask; the details pane gives it a day.
+        const qint64 id = backend.addReminder();
+        backend.indent(id);
+        backend.setDueIn(id, 1);
+        backend.commitTitle(id, "Book the cabin");
+        QCOMPARE(store.reminder(id)->parentId, trip);
+        QCOMPARE(store.reminder(id)->due, friday.date().addDays(1));
+        backend.undo();
+        QVERIFY(!store.reminder(id));
+        QVERIFY(!store.canUndo());
+    }
+
+    void anotherWindowsDraftSurvivesItsStartup() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store mine(path);
+        Backend window(&mine);
+        quiet(window, dir);
+        window.setViewKey("list:" + QString::number(addList(mine, "Home")));
+        const qint64 draft = window.addReminder();
+
+        // A second window opens while the first is still being typed in.
+        Store theirs(path);
+        Backend second(&theirs);
+        quiet(second, dir);
+        QVERIFY(theirs.reminder(draft));
+
+        mine.reloadIfChanged();
+        window.commitTitle(draft, "Buy milk");
+        QVERIFY(mine.reminder(draft));
+        QCOMPARE(mine.reminder(draft)->title, QString("Buy milk"));
+    }
+
+    void deletingCompletedTakesOnlyWhatTheViewHolds() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        backend.setClock([] { return friday; });
+        const qint64 home = addList(store, "Home"), work = addList(store, "Work");
+        Reminder tagged;
+        tagged.listId = work;
+        tagged.title = "Filed the report";
+        tagged.tags = {"work"};
+        const qint64 filed = store.put(tagged);
+        const qint64 paid = add(store, home, "Paid the rent", friday.date());
+        const qint64 cleaned = add(store, home, "Cleaned the gutters");
+        for (qint64 id : {filed, paid, cleaned})
+            store.complete(id, friday);
+        backend.setShowCompleted(true);
+
+        // In #work only the one done there is on screen, and only it goes.
+        backend.setViewKey("tag:work");
+        QCOMPARE(backend.reminders()->rowCount(), 1);
+        QCOMPARE(backend.completedCount(), 1);
+        backend.clearCompleted();
+        QVERIFY(!store.reminder(filed));
+        QVERIFY(store.reminder(paid) && store.reminder(cleaned));
+
+        backend.setViewKey("today");
+        QCOMPARE(backend.completedCount(), 1);
+        backend.clearCompleted();
+        QVERIFY(!store.reminder(paid));
+        QVERIFY(store.reminder(cleaned));
+
+        // A list still clears all it has done, shown or not.
+        backend.setShowCompleted(false);
+        backend.setViewKey("list:" + QString::number(home));
+        QCOMPARE(backend.completedCount(), 1);
+        backend.clearCompleted();
+        QVERIFY(!store.reminder(cleaned));
+    }
+
+    void deletingCompletedLeavesNoSubtaskWithoutItsParent() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 home = addList(store, "Home");
+        // A finished reminder with a subtask still open, as an older Nudge could leave it.
+        Reminder trip;
+        trip.listId = home;
+        trip.title = "Trip";
+        trip.completed = true;
+        trip.completedAt = friday.toSecsSinceEpoch();
+        const qint64 tripId = store.put(trip);
+        Reminder cabin;
+        cabin.listId = home;
+        cabin.parentId = tripId;
+        cabin.title = "Book the cabin";
+        const qint64 cabinId = store.put(cabin);
+        // And one done with its subtasks, tagged where they are not.
+        Reminder project;
+        project.listId = home;
+        project.title = "Project";
+        project.tags = {"work"};
+        const qint64 projectId = store.put(project);
+        Reminder step;
+        step.listId = home;
+        step.parentId = projectId;
+        step.title = "First step";
+        const qint64 stepId = store.put(step);
+        store.complete(projectId, friday);
+
+        auto noneAdrift = [&store] {
+            for (const Reminder &r : store.reminders())
+                if (r.parentId && !store.reminder(r.parentId))
+                    return false;
+            return true;
+        };
+        backend.setViewKey("tag:work");
+        QCOMPARE(backend.completedCount(), 2);
+        backend.clearCompleted();
+        QVERIFY(!store.reminder(projectId) && !store.reminder(stepId));
+        QVERIFY(noneAdrift());
+
+        backend.setViewKey("list:" + QString::number(home));
+        backend.clearCompleted();
+        QVERIFY(noneAdrift());
+        QVERIFY(store.reminder(cabinId) && !store.reminder(cabinId)->completed);
+    }
+
+    void aChangeThatCannotBeSavedSaysSo() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 id = add(store, listId, "Dentist");
+        const qint64 other = add(store, listId, "Groceries");
+        backend.setViewKey("list:" + QString::number(listId));
+        // The file starts refusing what is written to it, as a full disk would.
+        behindTheStoresBack(store, "CREATE TRIGGER refuse BEFORE INSERT ON reminders "
+                                   "BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+        behindTheStoresBack(store, "CREATE TRIGGER keep BEFORE DELETE ON reminders "
+                                   "BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+
+        QSignalSpy notices(&backend, &Backend::notice);
+        backend.setTitle(id, "Dentist at nine");
+        QCOMPARE(store.reminder(id)->title, QString("Dentist"));
+        QTRY_VERIFY(!notices.isEmpty());
+        QVERIFY2(notices.last().first().toString().contains("database or disk is full"),
+                 qPrintable(notices.last().first().toString()));
+
+        // A deletion that failed is not covered up by the word for one that worked.
+        notices.clear();
+        backend.remove(other);
+        QTRY_VERIFY(notices.size() >= 2);
+        QVERIFY2(notices.last().first().toString().contains("database or disk is full"),
+                 qPrintable(notices.last().first().toString()));
+    }
+
+    void aTagWrittenTwoWaysIsOneEntry() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        const qint64 listId = addList(store, "Home");
+        auto tag = [&](const QString &name) {
+            Reminder r;
+            r.listId = listId;
+            r.title = "About " + name;
+            r.tags = {name};
+            r.position = store.endPosition(listId);
+            store.put(r);
+        };
+        // Written as often each way, the entry is the same whatever order the
+        // store holds them in; written more one way, it is that way.
+        for (int i = 0; i < 8; ++i) {
+            tag(QString("tag%1").arg(i));
+            tag(QString("Tag%1").arg(i));
+        }
+        tag("Errand");
+        tag("errand");
+        tag("errand");
+        Backend backend(&store);
+        quiet(backend, dir);
+
+        QStringList shown, expected{"tag:errand errand 3"};
+        for (int i = 0; i < 8; ++i)
+            expected << QString("tag:Tag%1 Tag%1 2").arg(i);
+        for (const SidebarEntry &entry : backend.views()->entries())
+            if (entry.group == "tags")
+                shown << entry.key + " " + entry.name + " " + QString::number(entry.count);
+        QCOMPARE(shown, expected);
+
+        // A view opened under another spelling is the entry's own.
+        backend.setViewKey("tag:ERRAND");
+        QCOMPARE(backend.viewKey(), QString("tag:errand"));
+        QCOMPARE(backend.reminders()->rowCount(), 3);
+    }
+
+    void completingAParentLingersOnlyWhatItCompleted() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 trip = add(store, listId, "Trip");
+        auto subtask = [&](const QString &title) {
+            Reminder r;
+            r.listId = listId;
+            r.parentId = trip;
+            r.title = title;
+            r.position = store.endPosition(listId);
+            return store.put(r);
+        };
+        const qint64 booked = subtask("Book the cabin");
+        subtask("Pack the car");
+        store.complete(booked, friday.addDays(-30));
+        backend.setViewKey("list:" + QString::number(listId));
+        QCOMPARE(titles(store, backend.reminders()->rows()), (QStringList{"Trip", "  Pack the car"}));
+
+        // What it completes stays a moment; what was done a month ago stays out of sight.
+        backend.toggleCompleted(trip);
+        QVERIFY(store.reminder(trip)->completed);
+        QCOMPARE(titles(store, backend.reminders()->rows()), (QStringList{"Trip", "  Pack the car"}));
+        QVERIFY(backend.reminders()->rowOf(booked) < 0);
+    }
+
+    void anOpenSubtaskShowsWhenItsParentIsHidden() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        const qint64 listId = addList(store, "Home");
+        // A finished reminder with a subtask still open, as an older Nudge could leave it.
+        Reminder trip;
+        trip.listId = listId;
+        trip.title = "Trip";
+        trip.completed = true;
+        trip.completedAt = friday.toSecsSinceEpoch();
+        const qint64 tripId = store.put(trip);
+        Reminder cabin;
+        cabin.listId = listId;
+        cabin.parentId = tripId;
+        cabin.title = "Book the cabin";
+        cabin.position = 1;
+        const qint64 cabinId = store.put(cabin);
+        add(store, listId, "Water the plants");
+
+        ViewOptions options;
+        options.now = friday;
+        for (const View &view : {View{View::List, listId, {}}, View{View::All, 0, {}}}) {
+            const QVector<Row> rows = buildRows(store, view, options);
+            QVERIFY2(showsRow(rows, cabinId), qPrintable(titles(store, rows).join(", ")));
+        }
+        if (store.reminder(tripId)->completed) {
+            // On its own, where its parent would be, and saying whose it is.
+            QCOMPARE(titles(store, buildRows(store, View{View::List, listId, {}}, options)),
+                     (QStringList{"Book the cabin", "Water the plants"}));
+            ReminderModel model(&store);
+            model.show(buildRows(store, View{View::List, listId, {}}, options), true);
+            QCOMPARE(model.data(model.index(model.rowOf(cabinId)), ReminderModel::ParentTitleRole).toString(),
+                     QString("Trip"));
+        }
+        options.showCompleted = true;
+        QCOMPARE(titles(store, buildRows(store, View{View::List, listId, {}}, options)),
+                 (QStringList{"Trip", "  Book the cabin", "Water the plants"}));
+    }
+
+    void subtasksAreNotAddedUnderFinishedReminders() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 trip = add(store, listId, "Trip");
+        const qint64 cabin = add(store, listId, "Book the cabin");
+        const qint64 car = add(store, listId, "Pack the car");
+        backend.setViewKey("list:" + QString::number(listId));
+        backend.indent(cabin);
+        store.complete(trip, friday);
+        backend.setShowCompleted(true);
+        store.clearUndo();
+
+        // Tab under a finished reminder means it is not finished after all.
+        QSignalSpy notices(&backend, &Backend::notice);
+        backend.indent(car);
+        QCOMPARE(store.reminder(car)->parentId, trip);
+        QVERIFY(!store.reminder(trip)->completed);
+        QCOMPARE(notices.count(), 1);
+        backend.setShowCompleted(false);
+        QVERIFY(backend.reminders()->rowOf(car) >= 0);
+        // One step takes both back.
+        backend.undo();
+        QCOMPARE(store.reminder(car)->parentId, 0);
+        QVERIFY(store.reminder(trip)->completed);
+
+        // N beside a finished subtask adds a reminder of its own, below what it belongs to.
+        backend.setShowCompleted(true);
+        backend.setSelectedId(cabin);
+        const qint64 id = backend.addReminder();
+        QCOMPARE(store.reminder(id)->parentId, 0);
+        backend.commitTitle(id, "Buy snacks");
+        QCOMPARE(titles(store, backend.reminders()->rows()),
+                 (QStringList{"Trip", "  Book the cabin", "Buy snacks", "Pack the car"}));
+        QVERIFY(store.reminder(trip)->completed);
+    }
+
+    void linksSayWhatKindTheyAre() {
+        QCOMPARE(ReminderModel::linkLabel("https://www.example.com/a?b=c"), QString("example.com"));
+        QCOMPARE(ReminderModel::linkLabel("example.com/path"), QString("example.com"));
+        QCOMPARE(ReminderModel::linkLabel("http://docs.example.com"), QString("docs.example.com"));
+        // Anything but a web page says what kind of link it is.
+        QCOMPARE(ReminderModel::linkLabel("claude://claude.ai/new?q=hello"), QString("claude://claude.ai"));
+        QCOMPARE(ReminderModel::linkLabel("zoommtg://zoom.us/join?confno=1"), QString("zoommtg://zoom.us"));
+        QCOMPARE(ReminderModel::linkLabel("vnd.sun.star.webdavs://docs.example.com/Q3.odt"),
+                 QString("vnd.sun.star.webdavs://docs.example.com"));
+        QCOMPARE(ReminderModel::linkLabel("file:///home/me/notes.txt"), QString("file:///home/me/notes.txt"));
+        QCOMPARE(ReminderModel::linkLabel("  "), QString());
     }
 
     void backgroundRemindersGoThroughSystemd() {
