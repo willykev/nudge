@@ -73,6 +73,12 @@ Item {
             editor.focus = false // or the list would hand the keyboard straight back
     }
     Component.onCompleted: if (editing) startEditing()
+    // A row taken away mid-edit keeps what was typed, as clicking away does:
+    // the view moved, or the language changed, while another window had the
+    // keyboard. One scrolled out of sight while its field has the keyboard
+    // is still being typed in, and comes back with the typing.
+    Component.onDestruction: if (row.editing) app.finishEdit(editor.text, false)
+    ListView.onPooled: if (row.editing && !editor.activeFocus) app.finishEdit(editor.text, false)
 
     // The row under the keys is drawn as the Omarchy menu draws its own: a
     // faint fill, a hairline around it, and its title in the accent.
@@ -155,7 +161,10 @@ Item {
                 color: app.dim
             }
             HoverHandler { id: boxHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: backend.toggleCompleted(row.rid) }
+            // A click here is a click on the row first, so a title being typed
+            // is finished, and a new reminder settled, before the completion
+            // is a step of its own.
+            TapHandler { onTapped: { app.select(row.rid); backend.toggleCompleted(row.rid) } }
         }
 
         ColumnLayout {

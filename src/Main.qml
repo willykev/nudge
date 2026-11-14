@@ -149,9 +149,22 @@ ApplicationWindow {
         const draft = backend.draftId === id
         editingId = 0
         activeEditor = null // so a later edit never saves this one's text
+        // A new reminder left blank for a field of the details showing it is
+        // still being added there: it stays selected for the details to fill
+        // in, until the selection or the view moves on.
+        if (draft && !another && text.trim() === "" && backend.selectedId === id && within(activeFocusItem, details)) {
+            backend.holdDraft(id)
+            return
+        }
         backend.commitTitle(id, text)
         if (another && draft && text.trim() !== "")
             newReminder()
+    }
+    function within(item, ancestor) {
+        for (; item; item = item.parent)
+            if (item === ancestor)
+                return true
+        return false
     }
     function editList(key) {
         if (key === "")
@@ -225,10 +238,12 @@ ApplicationWindow {
     }
 
     Component.onCompleted: listView.forceActiveFocus()
-    // Closing the window mid-word keeps the word.
+    // Closing the window mid-word keeps the word, and settles a new reminder
+    // the details were filling in.
     onClosing: {
         focusList()
         details.flush()
+        backend.settleDraft()
     }
 
     Connections {

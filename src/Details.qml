@@ -28,6 +28,7 @@ Rectangle {
         for (const field of [titleField, linkField, dateField, timeField, endField, tagsField])
             field.flush()
         notesArea.flush()
+        every.flush()
     }
     // Shows the selected reminder. Another one gets the fields only after
     // what was typed for the last is saved; saving can land back here, so
@@ -44,6 +45,7 @@ Rectangle {
             for (const field of [titleField, linkField, dateField, timeField, endField, tagsField])
                 field.showValue()
             notesArea.text = notesArea.value
+            every.showValue()
         }
     }
     Connections {
@@ -213,6 +215,17 @@ Rectangle {
                     to: 999 // as far as a repeat goes, so no interval is cut down to fit
                     value: pane.item.repeatInterval || 1
                     onValueModified: backend.setRepeat(pane.loadedId, pane.item.repeatUnit, value)
+                    // A number typed but not yet entered is the reminder's it
+                    // was typed for. One left half typed (cleared, or out of
+                    // range) is dropped.
+                    function flush() {
+                        if (visible && pane.loadedId && contentItem.acceptableInput
+                                && contentItem.text !== textFromValue(value, locale))
+                            backend.setRepeat(pane.loadedId, pane.item.repeatUnit, valueFromText(contentItem.text, locale))
+                    }
+                    // Typing leaves the number shown as it was typed until the
+                    // value changes, and the next reminder's may well not.
+                    function showValue() { contentItem.text = Qt.binding(() => textFromValue(value, locale)) }
                 }
             }
             Text {

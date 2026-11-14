@@ -61,7 +61,9 @@ Item {
                 color: toolHover.hovered ? app.cursorFill : "transparent"
                 Glyph { anchors.centerIn: parent; name: modelData.icon; size: 12; color: app.dim }
                 HoverHandler { id: toolHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: modelData.action() }
+                // A title being typed is finished first, so its new reminder
+                // is added and named in one step, before this one.
+                TapHandler { onTapped: { app.focusList(); modelData.action() } }
             }
         }
     }

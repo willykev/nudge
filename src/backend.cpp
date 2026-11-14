@@ -161,11 +161,13 @@ void Backend::refresh(bool reset) {
 
     if (m_draftId && !m_store->reminder(m_draftId)) {
         m_draftId = 0;
+        m_draftHeld = false;
         emit draftChanged();
     }
     // Something stays selected: when the selected reminder leaves the view,
-    // the one that took its place is next.
-    if (m_model->rowOf(m_selectedId) < 0)
+    // the one that took its place is next. A new reminder the details pane is
+    // filling in stays, though what the pane gave it took it out of the view.
+    if (m_model->rowOf(m_selectedId) < 0 && !(m_draftHeld && m_selectedId == m_draftId))
         selectNear(qMax(0, row));
 
     updateSidebar();
@@ -278,6 +280,9 @@ void Backend::setViewKey(const QString &key) {
     selectNear(0);
     emit selectedIdChanged();
     emit viewChanged();
+    // The view leaves a new reminder the details pane was filling in, once
+    // the pane has saved what was typed for it.
+    settleDraft();
 }
 
 QString Backend::viewKind() const {
@@ -381,12 +386,15 @@ void Backend::setSearch(const QString &text) {
     selectNear(0);
     emit selectedIdChanged();
     emit viewChanged();
+    settleDraft(); // as a view does
 }
 
 // ---- Selection ---------------------------------------------------------------
 
 void Backend::setSelectedId(qint64 id) {
-    if (id == m_selectedId)
+    // One gone meanwhile, as a new reminder its own box just discarded, is
+    // no place for the selection.
+    if (id == m_selectedId || (id && !m_store->reminder(id)))
         return;
     m_selectedId = id;
     // Edits to another reminder are another step to undo. A reminder being
@@ -396,6 +404,10 @@ void Backend::setSelectedId(qint64 id) {
         m_store->sealUndo();
     emit selectedIdChanged();
     rememberSelection();
+    // Left by the selection, one the details pane was filling in is settled,
+    // once the pane has saved what was typed for it.
+    if (m_draftHeld && id != m_draftId)
+        settleDraft();
 }
 
 void Backend::selectNear(int row) {
@@ -538,6 +550,8 @@ void Backend::spread(qint64 listId) {
 qint64 Backend::addReminder() {
     if (!m_store->isOpen())
         return 0;
+    // One the details pane was filling in is done with first.
+    settleDraft();
     // A reminder cannot start out finished, or as a search result.
     if (m_view.kind == View::Completed || m_view.kind == View::Search)
         setViewKey("list:" + QString::number(m_store->defaultListId()));
@@ -605,9 +619,14 @@ void Backend::commitTitle(qint64 id, const QString &text) {
             setTitle(id, title);
         return;
     }
+    // Named in the list with nothing, one the details pane is filling in
+    // keeps what the pane gave it, and is settled when it is left.
+    if (title.isEmpty() && m_draftHeld)
+        return;
 
     const QString key = m_draftKey;
     m_draftId = 0;
+    m_draftHeld = false;
     emit draftChanged();
     if (title.isEmpty()) {
         // Nothing was typed, so nothing was added, and nothing is left to undo.
@@ -650,6 +669,31 @@ void Backend::commitTitle(qint64 id, const QString &text) {
                         ? tr("Saved for %1").arg(Dates::formatDue(saved->due, saved->dueMinutes, now().date()))
                         : tr("Saved to %1").arg(list ? list->name : QString()));
     }
+}
+
+void Backend::holdDraft(qint64 id) {
+    m_draftHeld = id && id == m_draftId;
+}
+
+// The details pane was filling in a new reminder, and the selection, the
+// view, or the window has left it. With a title or notes it is added, all it
+// was given one step to undo; with neither it goes without a trace.
+void Backend::settleDraft() {
+    if (!m_draftHeld)
+        return;
+    m_draftHeld = false;
+    const qint64 id = std::exchange(m_draftId, 0);
+    emit draftChanged();
+    const Reminder *r = m_store->reminder(id);
+    if (!r)
+        return;
+    if (!r->title.isEmpty() || !r->notes.trimmed().isEmpty()) {
+        m_store->sealUndo();
+        return;
+    }
+    m_store->discardLast(m_draftKey);
+    if (m_store->reminder(id))
+        m_store->removeReminder(id);
 }
 
 QString Backend::quickPreview(const QString &text) const {
@@ -741,6 +785,13 @@ void Backend::clearDue(qint64 id) {
 void Backend::remove(qint64 id) {
     if (!m_store->reminder(id))
         return;
+    // One the details pane was filling in with nothing in it yet was never
+    // added, so it goes without a trace instead.
+    if (id == m_draftId && m_draftHeld) {
+        settleDraft();
+        if (!m_store->reminder(id))
+            return;
+    }
     if (id == m_draftId) {
         m_draftId = 0;
         emit draftChanged();

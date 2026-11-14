@@ -3530,6 +3530,471 @@ private slots:
         QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
     }
 
+private:
+    // Clicks a reminder's box once the rows have stopped sliding aside.
+    static bool tickBox(const QmlWindow &w, qint64 id) {
+        QQuickItem *row = w.row(id);
+        for (qreal before = -1; row && row->y() != before;) {
+            before = row->y();
+            QTest::qWait(60);
+        }
+        QQuickItem *box = row ? w.find([](QQuickItem *item) {
+            return item->inherits("QQuickRectangle") && item->width() == 15 && item->height() == 15;
+        }, row) : nullptr;
+        if (box)
+            w.click(box);
+        return box != nullptr;
+    }
+
+private slots:
+    // A title being typed is kept when its row is taken away while another
+    // window has the keyboard (an alert's Open moving the view, the language
+    // changing), and the keys work again once the window is back. A row
+    // scrolled out of sight while its field has the keyboard is still typed in.
+    void aTitleBeingTypedOutlastsItsRow() {
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home"), work = addList(w.store, "Work");
+        const qint64 alpha = add(w.store, home, "Alpha");
+        const qint64 report = add(w.store, work, "Report");
+        w.backend.setViewKey("list:" + QString::number(home));
+        w.backend.setSelectedId(alpha);
+        QVERIFY(w.open());
+        auto *list = w.window->findChild<QQuickItem *>("reminders");
+        QWindow other;
+        other.resize(80, 80);
+        // Another window takes the keyboard, the list changes meanwhile, and
+        // the window comes back: what an alert's Open does, bar hyprctl.
+        const auto away = [&](const std::function<void()> &meanwhile) {
+            other.show();
+            other.requestActivate();
+            if (!QTest::qWaitForWindowActive(&other) || w.window->isActive())
+                return false;
+            meanwhile();
+            w.window->requestActivate();
+            return QTest::qWaitForWindowActive(w.window);
+        };
+
+        // A new reminder, and the view moves to another list.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        w.type("Water the plants");
+        QVERIFY(away([&] {
+            w.backend.setViewKey("list:" + QString::number(work));
+            w.backend.setSelectedId(report);
+        }));
+        QCOMPARE(w.editingId(), 0);
+        QVERIFY(w.titled("Water the plants"));
+        QVERIFY(w.window->property("keys").toBool());
+
+        // A rename, and the language changes.
+        w.backend.setViewKey("list:" + QString::number(home));
+        w.backend.setSelectedId(alpha);
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTRY_COMPARE(w.editingId(), alpha);
+        w.type(" and more");
+        QVERIFY(away([&] { w.backend.retranslate(); }));
+        QCOMPARE(w.editingId(), 0);
+        QCOMPARE(w.store.reminder(alpha)->title, QString("Alpha and more"));
+        QVERIFY(w.window->property("keys").toBool());
+
+        // A new reminder, and a reminder far down the same list is shown.
+        for (int i = 0; i < 60; ++i)
+            add(w.store, home, QString("Item %1").arg(i));
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 tea = w.editingId();
+        w.type("Tea");
+        QVERIFY(away([&] { w.backend.setSelectedId(w.titled("Item 59")); }));
+        QVERIFY(!w.row(tea));
+        QCOMPARE(w.editingId(), 0);
+        QCOMPARE(w.titled("Tea"), tea);
+        QVERIFY(w.window->property("keys").toBool());
+
+        // Scrolled away while it has the keyboard, the typing goes on.
+        w.backend.setSelectedId(alpha);
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 green = w.editingId();
+        w.type("Green");
+        QMetaObject::invokeMethod(list, "positionViewAtEnd");
+        QTRY_VERIFY(!w.row(green));
+        QCOMPARE(w.editingId(), green);
+        w.type(" tea");
+        QMetaObject::invokeMethod(list, "positionViewAtBeginning");
+        QTRY_VERIFY(w.row(green));
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_COMPARE(w.editingId(), 0);
+        QCOMPARE(w.titled("Green tea"), green);
+        QVERIFY(!w.store.reminder(green)->completed);
+
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
+    // Ticking a box, or a section's tool, while a new reminder is being typed
+    // finishes its title first: adding and naming it stay one step to undo,
+    // and one left blank goes without a trace.
+    void aClickOnABoxFinishesTheTitleFirst() {
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home");
+        const qint64 a = add(w.store, home, "Alpha"), b = add(w.store, home, "Beta");
+        Section section;
+        section.listId = home;
+        section.name = "Later";
+        section.position = 1;
+        const qint64 later = w.store.put(section);
+        w.backend.setViewKey("list:" + QString::number(home));
+        w.backend.setSelectedId(a);
+        w.store.clearUndo();
+        QVERIFY(w.open());
+
+        // Another reminder's box.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 milk = w.editingId();
+        w.type("Buy milk");
+        QVERIFY(tickBox(w, b));
+        QTRY_COMPARE(w.editingId(), 0);
+        QVERIFY(w.store.reminder(b)->completed);
+        QCOMPARE(w.titled("Buy milk"), milk);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(b)->completed);
+        QCOMPARE(w.titled("Buy milk"), milk);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(milk));
+        QVERIFY(!w.store.canUndo());
+
+        // Left blank: another reminder's box, then its own.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 blank = w.editingId();
+        QVERIFY(tickBox(w, a));
+        QTRY_COMPARE(w.editingId(), 0);
+        QVERIFY(!w.store.reminder(blank));
+        QVERIFY(w.store.reminder(a)->completed);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(a)->completed);
+        QCOMPARE(w.store.reminders().size(), 2);
+        QVERIFY(!w.store.canUndo());
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 own = w.editingId();
+        QVERIFY(tickBox(w, own));
+        QTRY_COMPARE(w.editingId(), 0);
+        QVERIFY(!w.store.reminder(own));
+        QVERIFY(w.store.reminder(w.backend.selectedId())); // nothing gone stays selected
+        QVERIFY(w.backend.selectedRow() >= 0);
+        QVERIFY(!w.store.canUndo());
+
+        // A section's trash.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 mum = w.editingId();
+        w.type("Call mum");
+        QQuickItem *heading = w.find([later](QQuickItem *item) { return item->property("sectionId").toLongLong() == later; });
+        QVERIFY(heading);
+        QTest::mouseMove(w.window, heading->mapToScene(QPointF(heading->width() / 2, heading->height() / 2)).toPoint());
+        QQuickItem *trash = w.find([](QQuickItem *item) { return item->property("name").toString() == "trash"; }, heading);
+        QVERIFY(trash);
+        QTRY_VERIFY(trash->isVisible() && trash->width() > 0);
+        w.click(trash);
+        QTRY_VERIFY(w.store.sections().isEmpty());
+        QCOMPARE(w.editingId(), 0);
+        QCOMPARE(w.titled("Call mum"), mum);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(w.store.sections().size(), 1);
+        QCOMPARE(w.titled("Call mum"), mum);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(mum));
+        QVERIFY(!w.store.canUndo());
+
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
+    // A new reminder left for the details before it has a title is the one
+    // they fill in: what is typed there lands on it, never on the reminder
+    // selected before it. Clicked away from, it stays if anything was typed in
+    // it, as one step to undo, and goes without a trace if nothing was.
+    void aNewReminderIsFilledInThroughTheDetails() {
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home");
+        const qint64 a = add(w.store, home, "Alpha"), b = add(w.store, home, "Beta"), c = add(w.store, home, "Gamma");
+        w.backend.setViewKey("list:" + QString::number(home));
+        w.backend.setSelectedId(b);
+        w.store.clearUndo();
+        QVERIFY(w.open(true));
+        QQuickItem *title = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickTextField") && item->property("text").toString() == "Beta";
+        });
+        QQuickItem *notes = w.find([](QQuickItem *item) { return item->inherits("QQuickTextArea"); });
+        QQuickItem *date = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickTextField") && item->property("placeholderText").toString() == "Date";
+        });
+        QVERIFY(title && notes && date);
+        const auto others = [&w, a, b, c] {
+            QStringList seen;
+            for (qint64 id : {a, b, c}) {
+                const Reminder *r = w.store.reminder(id);
+                seen << QString("%1|%2|%3").arg(r->title, r->notes, r->due.toString(Qt::ISODate));
+            }
+            return seen;
+        };
+        const QStringList before = others();
+
+        // Its title.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 milk = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QCOMPARE(w.editingId(), 0);
+        QCOMPARE(w.backend.selectedId(), milk);
+        QCOMPARE(title->property("text").toString(), QString());
+        w.type("Buy milk");
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QCOMPARE(w.titled("Buy milk"), milk);
+        QCOMPARE(others(), before);
+        w.clickRow(c);
+        QCOMPARE(w.backend.selectedId(), c);
+        QCOMPARE(w.backend.draftId(), 0);
+        QCOMPARE(w.titled("Buy milk"), milk);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(milk));
+        QVERIFY(!w.store.canUndo());
+
+        // Its title typed but not entered, and the selection moves on with no
+        // click, as an alert's Show moves it.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 eggs = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        w.type("Eggs");
+        w.backend.setSelectedId(a);
+        QCOMPARE(w.titled("Eggs"), eggs);
+        QCOMPARE(w.backend.draftId(), 0);
+        QCOMPARE(others(), before);
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(!title->hasActiveFocus());
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(eggs));
+        QVERIFY(!w.store.canUndo());
+
+        // Its notes and its date, and no title: what was typed stays.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 cash = w.editingId();
+        w.click(notes);
+        QTRY_VERIFY(notes->hasActiveFocus());
+        QCOMPARE(w.backend.selectedId(), cash);
+        w.type("Bring cash");
+        w.click(date);
+        QTRY_VERIFY(date->hasActiveFocus());
+        w.type("tomorrow");
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QVERIFY(w.store.reminder(cash));
+        QCOMPARE(w.store.reminder(cash)->notes, QString("Bring cash"));
+        QCOMPARE(w.store.reminder(cash)->due, QDate(2026, 11, 14));
+        QCOMPARE(w.backend.selectedId(), cash);
+        QCOMPARE(others(), before);
+        // Renamed in the list with nothing typed, it keeps what it was given.
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(w.window->property("keys").toBool());
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTRY_COMPARE(w.editingId(), cash);
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_COMPARE(w.editingId(), 0);
+        QVERIFY(w.store.reminder(cash));
+        QCOMPARE(w.backend.selectedId(), cash);
+        w.clickRow(a);
+        QCOMPARE(w.backend.selectedId(), a);
+        QCOMPARE(w.backend.draftId(), 0);
+        QVERIFY(w.store.reminder(cash));
+        QCOMPARE(w.store.reminder(cash)->notes, QString("Bring cash"));
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(cash));
+        QVERIFY(!w.store.canUndo());
+
+        // Nothing typed in it, and left for another new reminder, deleted, or
+        // left for another reminder.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 first = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QCOMPARE(w.backend.selectedId(), first);
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(w.window->property("keys").toBool());
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        QVERIFY(!w.store.reminder(first));
+        const qint64 second = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(w.window->property("keys").toBool());
+        QTest::keyClick(w.window, Qt::Key_Delete);
+        QVERIFY(!w.store.reminder(second));
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 third = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        w.clickRow(b);
+        QCOMPARE(w.backend.selectedId(), b);
+        QVERIFY(!w.store.reminder(third));
+        QCOMPARE(w.store.reminders().size(), 3);
+        QVERIFY(!w.store.canUndo());
+        QCOMPARE(others(), before);
+        // Or for another reminder's box: only the tick is left to undo.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 fourth = w.editingId();
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QVERIFY(tickBox(w, c));
+        QVERIFY(!w.store.reminder(fourth));
+        QVERIFY(w.store.reminder(c)->completed);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(c)->completed);
+        QCOMPARE(w.store.reminders().size(), 3);
+        QVERIFY(!w.store.canUndo());
+
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
+    // A new reminder the details are filling in stays selected when what they
+    // give it takes it out of the view, so the next field typed in still fills
+    // it in. A choice from a dropdown is made for it too.
+    void aNewReminderStaysWithTheDetailsFillingItIn() {
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home"), work = addList(w.store, "Work");
+        const QDate today = friday.date();
+        const qint64 a = add(w.store, home, "Alpha", today), b = add(w.store, home, "Beta", today);
+        w.backend.setViewKey("today");
+        w.backend.setSelectedId(b);
+        w.store.clearUndo();
+        QVERIFY(w.open(true));
+        QQuickItem *title = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickTextField") && item->property("text").toString() == "Beta";
+        });
+        QQuickItem *date = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickTextField") && item->property("placeholderText").toString() == "Date";
+        });
+        QQuickItem *lists = w.find([](QQuickItem *item) {
+            return item->inherits("QQuickComboBox") && item->property("textRole").toString() == "name";
+        });
+        QQuickItem *priority = w.find([](QQuickItem *item) { return isDropdown(item, 4); });
+        QVERIFY(title && date && lists && priority);
+
+        // A date that takes it out of Today, then its title.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 dentist = w.editingId();
+        w.click(date);
+        QTRY_VERIFY(date->hasActiveFocus());
+        QTest::keyClick(w.window, Qt::Key_A, Qt::ControlModifier);
+        w.type("tomorrow");
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QVERIFY(w.store.reminder(dentist));
+        QCOMPARE(w.store.reminder(dentist)->due, QDate(2026, 11, 14));
+        QCOMPARE(w.backend.selectedRow(), -1);
+        QCOMPARE(w.backend.selectedId(), dentist);
+        w.click(title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QCOMPARE(title->property("text").toString(), QString());
+        w.type("Dentist");
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QCOMPARE(w.titled("Dentist"), dentist);
+        QCOMPARE(w.store.reminder(b)->title, QString("Beta"));
+        QCOMPARE(w.store.reminder(b)->due, today);
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(w.window->property("keys").toBool());
+        QTest::keyClick(w.window, Qt::Key_J);
+        QVERIFY(w.backend.selectedRow() >= 0);
+        QCOMPARE(w.backend.draftId(), 0);
+        QCOMPARE(w.titled("Dentist"), dentist);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(dentist));
+        QVERIFY(!w.store.canUndo());
+
+        // A priority chosen, then its title typed in the list.
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 rent = w.editingId();
+        QVERIFY(w.pick(priority, 3));
+        QVERIFY(w.store.reminder(rent));
+        QCOMPARE(w.store.reminder(rent)->priority, 3);
+        QCOMPARE(w.backend.selectedId(), rent);
+        QCOMPARE(w.store.reminder(a)->priority, 0);
+        QCOMPARE(w.store.reminder(b)->priority, 0);
+        QTRY_VERIFY(w.window->property("keys").toBool());
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTRY_COMPARE(w.editingId(), rent);
+        w.type("Pay rent");
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_COMPARE(w.editingId(), 0);
+        QCOMPARE(w.titled("Pay rent"), rent);
+        QCOMPARE(w.backend.draftId(), 0);
+        QTest::keyClick(w.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!w.store.reminder(rent));
+        QVERIFY(!w.store.canUndo());
+
+        // Sent to another list, out of the view, and left with nothing typed
+        // in it when the view moves on: it goes without a trace.
+        w.backend.setViewKey("list:" + QString::number(home));
+        QTest::keyClick(w.window, Qt::Key_N);
+        QTRY_VERIFY(w.editingId() > 0);
+        const qint64 blank = w.editingId();
+        QVERIFY(w.pick(lists, 1));
+        QVERIFY(w.store.reminder(blank));
+        QCOMPARE(w.store.reminder(blank)->listId, work);
+        QCOMPARE(w.backend.selectedId(), blank);
+        QCOMPARE(w.backend.selectedRow(), -1);
+        w.backend.setViewKey("flagged");
+        QVERIFY(!w.store.reminder(blank));
+        QCOMPARE(w.store.reminders().size(), 2);
+        QVERIFY(!w.store.canUndo());
+
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
+    // A repeat number typed but not entered is saved to the reminder it was
+    // typed for when the selection moves on with no click, as an alert's Show
+    // moves it, and the next reminder shows its own, even one that reads the same.
+    void aRepeatTypedIsSavedToItsOwnReminder() {
+        QmlWindow w;
+        const qint64 home = addList(w.store, "Home");
+        const qint64 b = add(w.store, home, "Beta", friday.date()), c = add(w.store, home, "Gamma", friday.date());
+        for (const qint64 id : {b, c}) {
+            Reminder r = *w.store.reminder(id);
+            r.repeat = "weekly:1";
+            w.store.put(r);
+        }
+        w.backend.setViewKey("list:" + QString::number(home));
+        w.backend.setSelectedId(b);
+        QVERIFY(w.open(true));
+        QQuickItem *every = w.find([](QQuickItem *item) { return item->inherits("QQuickSpinBox"); });
+        QVERIFY(every);
+        auto *number = every->property("contentItem").value<QQuickItem *>();
+        QVERIFY(number);
+        QTRY_COMPARE(number->property("text").toString(), QString("1"));
+
+        w.click(number);
+        QTRY_VERIFY(number->hasActiveFocus());
+        QTest::keyClick(w.window, Qt::Key_A, Qt::ControlModifier);
+        w.type("5");
+        w.backend.setSelectedId(c);
+        QCOMPARE(w.store.reminder(b)->repeat, QString("weekly:5"));
+        QCOMPARE(w.store.reminder(c)->repeat, QString("weekly:1"));
+        QCOMPARE(number->property("text").toString(), QString("1"));
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_VERIFY(!number->hasActiveFocus());
+        QCOMPARE(w.store.reminder(b)->repeat, QString("weekly:5"));
+        QCOMPARE(w.store.reminder(c)->repeat, QString("weekly:1"));
+
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
     // ---- The look of the desktop -------------------------------------------------------
 
     void theLookFallsBackToOmarchysDefault() {

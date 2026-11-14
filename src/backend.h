@@ -93,6 +93,11 @@ public:
     // Reminders.
     Q_INVOKABLE qint64 addReminder();
     Q_INVOKABLE void commitTitle(qint64 id, const QString &text);
+    // A new reminder the details pane took the keyboard from before it had a
+    // title is still being added there, until it is settled: when the
+    // selection, the view, or the window leaves it, or another is added.
+    Q_INVOKABLE void holdDraft(qint64 id);
+    Q_INVOKABLE void settleDraft();
     Q_INVOKABLE QString quickPreview(const QString &text) const;
     Q_INVOKABLE void toggleCompleted(qint64 id);
     Q_INVOKABLE void toggleFlag(qint64 id);
@@ -195,6 +200,7 @@ private:
     int m_selectedRow = -1;
     qint64 m_draftId = 0;
     QString m_draftKey;
+    bool m_draftHeld = false; // by the details pane
     int m_drafts = 0;
     QSet<qint64> m_lingering, m_collapsed;
     QTimer m_linger, m_tick;
