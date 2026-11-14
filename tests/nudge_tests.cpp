@@ -2385,8 +2385,6 @@ private slots:
         QCOMPARE(direct.environment.value("QT_QPA_PLATFORM"), QString("wayland"));
     }
 
-    // ---- Alerts -------------------------------------------------------------------
-
     void commandsSayWhenAWriteFails() {
         QTemporaryDir dir;
         const QString path = dir.filePath("nudge.db");
@@ -2430,6 +2428,8 @@ private slots:
         QVERIFY(!store.reminder(id)->completed);
         QCOMPARE(store.lists().size(), 1);
     }
+
+    // ---- Alerts -------------------------------------------------------------------
 
     void remindersAlertOnceWhenDue() {
         QTemporaryDir dir;
