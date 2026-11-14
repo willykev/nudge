@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Nudge
+Comment=Reminders and to-do lists
+Comment[da]=Påmindelser og to-do-lister
+Comment[de]=Erinnerungen und Aufgabenlisten
+Comment[es]=Recordatorios y listas de tareas
+Comment[es_MX]=Recordatorios y listas de tareas
+Comment[fr]=Rappels et listes de tâches
+Comment[it]=Promemoria ed elenchi di cose da fare
+Comment[nl]=Herinneringen en takenlijsten
+Comment[pt_BR]=Lembretes e listas de tarefas
+Comment[sv]=Påminnelser och att göra-listor
+Exec=nudge open
+Icon=nudge
+Terminal=false
+Categories=Office;ProjectManagement;
+Keywords=reminders;todo;tasks;lists;
+StartupWMClass=nudge

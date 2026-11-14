@@ -1,0 +1,34 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="Sidebar.qml">Sidebar.qml</file>
+        <file alias="ReminderRow.qml">ReminderRow.qml</file>
+        <file alias="GroupHeading.qml">GroupHeading.qml</file>
+        <file alias="Details.qml">Details.qml</file>
+        <file alias="ListEditor.qml">ListEditor.qml</file>
+        <file alias="AskBox.qml">AskBox.qml</file>
+        <file alias="MovePicker.qml">MovePicker.qml</file>
+        <file alias="DateChooser.qml">DateChooser.qml</file>
+        <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="Glyph.qml">Glyph.qml</file>
+        <file alias="AppMenu.qml">AppMenu.qml</file>
+        <file alias="AppMenuItem.qml">AppMenuItem.qml</file>
+        <file alias="AppMenuSeparator.qml">AppMenuSeparator.qml</file>
+        <file alias="InputField.qml">InputField.qml</file>
+        <file alias="Dropdown.qml">Dropdown.qml</file>
+        <file alias="Stepper.qml">Stepper.qml</file>
+        <file alias="Toggle.qml">Toggle.qml</file>
+        <file alias="ScrollHandle.qml">ScrollHandle.qml</file>
+        <file alias="PushButton.qml">PushButton.qml</file>
+        <file alias="skill.md">skill.md</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="i18n/da.json">i18n/da.json</file>
+        <file alias="i18n/de.json">i18n/de.json</file>
+        <file alias="i18n/es-MX.json">i18n/es-MX.json</file>
+        <file alias="i18n/fr.json">i18n/fr.json</file>
+        <file alias="i18n/it.json">i18n/it.json</file>
+        <file alias="i18n/nl.json">i18n/nl.json</file>
+        <file alias="i18n/pt-BR.json">i18n/pt-BR.json</file>
+        <file alias="i18n/sv.json">i18n/sv.json</file>
+    </qresource>
+</RCC>
