@@ -1,7 +1,7 @@
 # Not "nudge": the AUR has an unrelated Electron app by that name, and yay
 # (omarchy update) would try to "upgrade" this package to it.
 pkgname=nudge-reminders
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Reminders and to-do lists for the Omarchy desktop'
 arch=('x86_64' 'aarch64')

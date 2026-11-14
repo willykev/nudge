@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 — 2026-11-14
+
+- Renaming a reminder that is scrolled out of view no longer stops as soon
+  as it starts, which sent the next keys typed to the single-key shortcuts.
+
 ## 0.1.1 — 2026-11-13
 
 Fixes from a full code and security review of 0.1.0.
