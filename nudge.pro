@@ -7,6 +7,13 @@ TEMPLATE = app
 VERSION = $$cat($$PWD/VERSION)
 DEFINES += NUDGE_VERSION=\\\"$$VERSION\\\"
 
+# make follows neither VERSION nor a changed define on its own: a new VERSION
+# reruns qmake, and recompiles main.cpp, which builds the version in.
+QMAKE_INTERNAL_INCLUDED_FILES += $$PWD/VERSION
+versioned.target = main.o
+versioned.depends = $$PWD/VERSION
+QMAKE_EXTRA_TARGETS += versioned
+
 HEADERS += \
     src/alerts.h \
     src/backend.h \
