@@ -202,8 +202,11 @@ Item {
                     Keys.onEnterPressed: app.finishEdit(text, true)
                     Keys.onTabPressed: backend.indent(row.rid)
                     Keys.onBacktabPressed: backend.outdent(row.rid)
-                    // Clicking away keeps what was typed.
-                    onActiveFocusChanged: if (!activeFocus && row.editing) app.finishEdit(text, false)
+                    // Clicking away keeps what was typed. Another window
+                    // taking the keyboard for a moment (the pointer passing
+                    // over it, with focus following the mouse) is not that:
+                    // the typing goes on when the keyboard comes back.
+                    onActiveFocusChanged: if (!activeFocus && row.editing && app.active) app.finishEdit(text, false)
 
                     Text {
                         visible: editor.text === "" && editor.preeditText === ""
@@ -220,6 +223,7 @@ Item {
                 readonly property string reading: row.editing && row.draft ? backend.quickPreview(editor.text) : ""
                 visible: reading !== ""
                 text: reading
+                textFormat: Text.PlainText
                 color: app.accent
                 font.pixelSize: app.fsSmall
             }
@@ -244,6 +248,7 @@ Item {
                 Text {
                     visible: row.dueText !== ""
                     text: row.dueText
+                    textFormat: Text.PlainText
                     color: row.overdue ? app.danger : app.dim
                     font.pixelSize: app.fsSmall
                 }
@@ -251,17 +256,19 @@ Item {
                     visible: row.repeatText !== ""
                     spacing: 4
                     Glyph { name: "repeat"; size: 10; color: app.faint; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: row.repeatText; color: app.dim; font.pixelSize: app.fsSmall }
+                    Text { text: row.repeatText; textFormat: Text.PlainText; color: app.dim; font.pixelSize: app.fsSmall }
                 }
                 Text {
                     visible: row.tags !== ""
                     text: row.tags
+                    textFormat: Text.PlainText
                     color: row.done ? app.faint : app.dim
                     font.pixelSize: app.fsSmall
                 }
                 Text {
                     visible: row.link !== ""
                     text: row.link
+                    textFormat: Text.PlainText
                     color: app.dim
                     font.pixelSize: app.fsSmall
                     font.underline: true

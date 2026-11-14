@@ -103,13 +103,19 @@ ApplicationWindow {
             finishEdit(activeEditor ? activeEditor.text : "", false)
         listView.forceActiveFocus()
     }
+    // A title being typed is finished before the selection or the view moves
+    // on, so a new reminder's title is part of the step that added it, and
+    // one left blank is gone without a trace. Clicking its own row just
+    // finishes it.
     function select(id) {
-        backend.selectedId = id
+        const editing = editingId
         focusList()
+        if (id !== editing)
+            backend.selectedId = id
     }
     function showView(key) {
-        backend.viewKey = key
         focusList()
+        backend.viewKey = key
     }
     function step(delta) {
         if (pane === "sidebar")
@@ -124,19 +130,26 @@ ApplicationWindow {
             editingId = id
     }
     function editTitle() {
-        if (backend.selectedId)
-            editingId = backend.selectedId
+        const row = backend.selectedRow
+        if (row < 0)
+            return
+        // A row scrolled out of sight has no field to type in until it is
+        // back in view.
+        listView.positionViewAtIndex(row, ListView.Contain)
+        editingId = backend.selectedId
     }
     // Return while typing a new reminder saves it and starts the next, so a
-    // list can be written out one line after another.
+    // list can be written out one line after another. Nothing here takes the
+    // keyboard: the field letting go of it leaves it with the list, and a
+    // field clicked into keeps it.
     function finishEdit(text, another) {
         const id = editingId
         if (!id)
             return
         const draft = backend.draftId === id
         editingId = 0
+        activeEditor = null // so a later edit never saves this one's text
         backend.commitTitle(id, text)
-        listView.forceActiveFocus()
         if (another && draft && text.trim() !== "")
             newReminder()
     }
@@ -237,7 +250,9 @@ ApplicationWindow {
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: win.keys; onActivated: win.close() }
     Shortcut { sequence: "Escape"; context: Qt.ApplicationShortcut; enabled: !win.popupOpen; onActivated: win.goBack() }
     Shortcut { sequences: [StandardKey.Undo]; context: Qt.ApplicationShortcut; enabled: !win.popupOpen; onActivated: backend.undo() }
-    Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; enabled: !win.popupOpen; onActivated: backend.redo() }
+    // Named outright: the platform's Redo keys vary, and a key bound twice
+    // answers to neither.
+    Shortcut { sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]; context: Qt.ApplicationShortcut; enabled: !win.popupOpen; onActivated: backend.redo() }
 
     Shortcut { sequence: "Space"; context: Qt.ApplicationShortcut; enabled: win.onReminder; onActivated: backend.toggleCompleted(backend.selectedId) }
     Shortcut { sequences: ["N", "Ctrl+N"]; context: Qt.ApplicationShortcut; enabled: win.keys; onActivated: win.newReminder() }
@@ -331,6 +346,7 @@ ApplicationWindow {
                 id: bannerText
                 Layout.fillWidth: true
                 text: banner.text
+                textFormat: Text.PlainText
                 horizontalAlignment: Text.AlignLeft
                 color: banner.urgent ? win.danger : win.ink
                 font.pixelSize: win.fsBody
@@ -461,8 +477,11 @@ ApplicationWindow {
                         model: backend.model
                         focus: true
                         // Selection is the backend's. A current item would
-                        // take the keyboard for itself whenever rows change.
+                        // take the keyboard for itself whenever rows change,
+                        // and the arrows (Down while typing a title too)
+                        // would make one.
                         currentIndex: -1
+                        keyNavigationEnabled: false
                         clip: true
                         reuseItems: true
                         cacheBuffer: 480

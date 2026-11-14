@@ -6,12 +6,24 @@ import QtQuick.Controls.Basic
 ComboBox {
     id: box
     readonly property var ui: look.colors
+    // Clicked open, it lets go of the keyboard once its list closes, so the
+    // keys meant for elsewhere do not change it unseen.
+    signal letGo()
 
     font.family: look.fontFamily
     font.pixelSize: look.fontSize
     implicitHeight: 30
     leftPadding: 10
     rightPadding: 28
+
+    // Closed, the keys that would change the choice unseen (the arrows, Home
+    // and End, and letters, which pick by name) open the list instead, where
+    // the choice shows before Return makes it.
+    Keys.onPressed: event => {
+        const letter = event.text !== "" && event.text.charCodeAt(0) > 32 && event.text.charCodeAt(0) !== 127
+        if (!popup.visible && (letter || [Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End].includes(event.key)))
+            popup.open()
+    }
 
     contentItem: Text {
         text: box.displayText
@@ -68,6 +80,7 @@ ComboBox {
         topPadding: 4
         bottomPadding: 4
         implicitHeight: Math.min(contentItem.implicitHeight + topPadding + bottomPadding, 320)
+        onClosed: if (box.activeFocus && box.focusReason === Qt.MouseFocusReason) box.letGo()
 
         contentItem: ListView {
             clip: true

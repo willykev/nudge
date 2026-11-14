@@ -31,6 +31,7 @@ Rectangle {
         id: label
         anchors.centerIn: parent
         text: button.text
+        textFormat: Text.PlainText
         color: button.danger || button.primary ? button.tone : button.ui.foreground
         font.family: look.fontFamily
         font.pixelSize: Math.round(look.fontSize * 0.917)

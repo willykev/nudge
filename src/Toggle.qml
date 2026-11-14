@@ -50,6 +50,7 @@ Item {
         anchors.leftMargin: 9
         anchors.verticalCenter: parent.verticalCenter
         text: toggle.text
+        textFormat: Text.PlainText
         color: toggle.checked ? toggle.ui.foreground : toggle.ui.dim
         font.family: look.fontFamily
         font.pixelSize: look.fontSize

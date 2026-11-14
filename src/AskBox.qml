@@ -68,6 +68,7 @@ Popup {
         Text {
             Layout.fillWidth: true
             text: box.heading
+            textFormat: Text.PlainText
             horizontalAlignment: Text.AlignLeft
             wrapMode: Text.Wrap
             color: box.app.bright
@@ -78,6 +79,7 @@ Popup {
             visible: box.message !== ""
             Layout.fillWidth: true
             text: box.message
+            textFormat: Text.PlainText
             horizontalAlignment: Text.AlignLeft
             wrapMode: Text.Wrap
             color: box.app.dim

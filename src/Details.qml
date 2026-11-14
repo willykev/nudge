@@ -8,12 +8,12 @@ Rectangle {
     id: pane
     property var app
 
-    readonly property var item: backend.selected
+    // The reminder the fields were filled from, and its id. Edits are saved
+    // to it by id, and only load() moves it on, once what was typed is
+    // saved, so text typed for one reminder can never land on another.
+    property var item: ({})
     readonly property bool has: item.id !== undefined
-    // The reminder the fields were filled from. Edits are saved to it by id,
-    // so text typed for one reminder can never land on another.
     property var loadedId: 0
-    onItemChanged: loadedId = item.id !== undefined ? item.id : 0
 
     readonly property var repeatUnits: ["never", "daily", "weekdays", "weekly", "monthly", "yearly"]
     readonly property var earlyMinutes: [0, 5, 15, 30, 60, 120, 1440, 2880, 10080]
@@ -29,10 +29,28 @@ Rectangle {
             field.flush()
         notesArea.flush()
     }
+    // Shows the selected reminder. Another one gets the fields only after
+    // what was typed for the last is saved; saving can land back here, so
+    // the selection is read again after. Then every field starts afresh,
+    // even one that reads the same for both.
+    function load() {
+        if ((backend.selected.id || 0) !== loadedId)
+            flush()
+        const selected = backend.selected
+        const another = (selected.id || 0) !== loadedId
+        loadedId = selected.id || 0
+        item = selected
+        if (another) {
+            for (const field of [titleField, linkField, dateField, timeField, endField, tagsField])
+                field.showValue()
+            notesArea.text = notesArea.value
+        }
+    }
     Connections {
         target: backend
-        function onSelectedIdChanged() { pane.flush() }
+        function onSelectedChanged() { pane.load() }
     }
+    Component.onCompleted: load()
 
     // Small and bold, as the shell heads the sections of its panels.
     component Caption: Text {
@@ -186,12 +204,13 @@ Rectangle {
                     model: [qsTr("Never"), qsTr("Daily"), qsTr("Weekdays"), qsTr("Weekly"), qsTr("Monthly"), qsTr("Yearly")]
                     currentIndex: Math.max(0, pane.repeatUnits.indexOf(pane.item.repeatUnit))
                     onActivated: index => backend.setRepeat(pane.loadedId, pane.repeatUnits[index], every.value)
+                    onLetGo: app.focusList()
                 }
                 Stepper {
                     id: every
                     visible: repeatBox.currentIndex > 0 && repeatBox.currentIndex !== 2
                     from: 1
-                    to: 99
+                    to: 999 // as far as a repeat goes, so no interval is cut down to fit
                     value: pane.item.repeatInterval || 1
                     onValueModified: backend.setRepeat(pane.loadedId, pane.item.repeatUnit, value)
                 }
@@ -199,6 +218,7 @@ Rectangle {
             Text {
                 visible: pane.item.repeatInterval > 1
                 text: pane.item.repeatText || ""
+                textFormat: Text.PlainText
                 color: app.dim
                 font.pixelSize: app.fsSmall
             }
@@ -220,6 +240,7 @@ Rectangle {
                         qsTr("1 week before")]
                 currentIndex: Math.max(0, pane.earlyMinutes.indexOf(pane.item.early))
                 onActivated: index => backend.setEarly(pane.loadedId, pane.earlyMinutes[index])
+                onLetGo: app.focusList()
             }
 
             Caption { text: qsTr("List") }
@@ -229,6 +250,7 @@ Rectangle {
                 textRole: "name"
                 currentIndex: backend.lists.findIndex(list => list.id === pane.item.listId)
                 onActivated: index => backend.moveToList(pane.loadedId, backend.lists[index].id)
+                onLetGo: app.focusList()
             }
 
             Caption { text: qsTr("Priority") }
@@ -240,6 +262,7 @@ Rectangle {
                     model: [qsTr("None"), qsTr("Low"), qsTr("Medium"), qsTr("High")]
                     currentIndex: pane.item.priority || 0
                     onActivated: index => backend.setPriority(pane.loadedId, index)
+                    onLetGo: app.focusList()
                 }
                 Toggle {
                     text: qsTr("Flag")
