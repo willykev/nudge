@@ -412,6 +412,30 @@ private slots:
         QCOMPARE(Dates::parseDate("29/2", today), QDate(2028, 2, 29));
     }
 
+    void tonightWithoutATimeIsStillAhead() {
+        // Once eight has gone by, tonight is the next hour on the clock...
+        QuickEntry entry = typedAt("Movie tonight", 21, 30);
+        QCOMPARE(entry.title, QString("Movie"));
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 22 * 60);
+        entry = typedAt("Take out the trash this evening", 21, 30);
+        QCOMPARE(entry.title, QString("Take out the trash"));
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 22 * 60);
+        // ...and after eleven, the midnight that starts the next day.
+        entry = typedAt("Movie tonight", 23, 30);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 0);
+        entry = typedAt("Movie this evening", 23, 30);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 0);
+        // Before eight it is eight, and on another day that day's eight.
+        QCOMPARE(typedAt("Movie tonight", 19, 59).minutes, 20 * 60);
+        entry = typedAt("Movie tonight tomorrow", 23, 30);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 20 * 60);
+    }
+
     // ---- The store ---------------------------------------------------------------
 
     void storeKeepsWhatItIsGiven() {

@@ -367,8 +367,10 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     }
 
     const int nowMinutes = now.time().hour() * 60 + now.time().minute();
+    // Tonight without a time is eight o'clock or, once eight has gone by, the
+    // next hour on the clock: after eleven that is midnight, moved on below.
     if (tonight && minutes < 0)
-        minutes = 20 * 60;
+        minutes = date == today ? qMax(20 * 60, (nowMinutes / 60 + 1) * 60) : 20 * 60;
     // Tonight runs from the evening into the small hours. Without am or pm,
     // "tonight at 9" is 21:00 and "tonight at 12" midnight, and a time before
     // noon that has already gone by belongs to the night ahead.
