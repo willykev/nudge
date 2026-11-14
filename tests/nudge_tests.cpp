@@ -1771,18 +1771,25 @@ private slots:
         Backend backend(&store);
         quiet(backend, dir);
         const qint64 home = addList(store, "Home");
-        // A finished reminder with a subtask still open, as an older Nudge could leave it.
+        // A finished reminder with a subtask still open, as another process
+        // can leave it until the store next opens.
         Reminder trip;
         trip.listId = home;
         trip.title = "Trip";
-        trip.completed = true;
-        trip.completedAt = friday.toSecsSinceEpoch();
         const qint64 tripId = store.put(trip);
         Reminder cabin;
         cabin.listId = home;
         cabin.parentId = tripId;
         cabin.title = "Book the cabin";
         const qint64 cabinId = store.put(cabin);
+        // Finished once its subtask is in: putting an open subtask under a
+        // finished reminder would take that back to do.
+        trip = *store.reminder(tripId);
+        trip.completed = true;
+        trip.completedAt = friday.toSecsSinceEpoch();
+        store.put(trip);
+        QVERIFY(store.reminder(tripId)->completed);
+        QVERIFY(!store.reminder(cabinId)->completed);
         // And one done with its subtasks, tagged where they are not.
         Reminder project;
         project.listId = home;
@@ -1917,12 +1924,11 @@ private slots:
         QTemporaryDir dir;
         Store store(dir.filePath("nudge.db"));
         const qint64 listId = addList(store, "Home");
-        // A finished reminder with a subtask still open, as an older Nudge could leave it.
+        // A finished reminder with a subtask still open, as another process
+        // can leave it until the store next opens.
         Reminder trip;
         trip.listId = listId;
         trip.title = "Trip";
-        trip.completed = true;
-        trip.completedAt = friday.toSecsSinceEpoch();
         const qint64 tripId = store.put(trip);
         Reminder cabin;
         cabin.listId = listId;
@@ -1930,6 +1936,14 @@ private slots:
         cabin.title = "Book the cabin";
         cabin.position = 1;
         const qint64 cabinId = store.put(cabin);
+        // Finished once its subtask is in: putting an open subtask under a
+        // finished reminder would take that back to do.
+        trip = *store.reminder(tripId);
+        trip.completed = true;
+        trip.completedAt = friday.toSecsSinceEpoch();
+        store.put(trip);
+        QVERIFY(store.reminder(tripId)->completed);
+        QVERIFY(!store.reminder(cabinId)->completed);
         add(store, listId, "Water the plants");
 
         ViewOptions options;
@@ -1938,15 +1952,13 @@ private slots:
             const QVector<Row> rows = buildRows(store, view, options);
             QVERIFY2(showsRow(rows, cabinId), qPrintable(titles(store, rows).join(", ")));
         }
-        if (store.reminder(tripId)->completed) {
-            // On its own, where its parent would be, and saying whose it is.
-            QCOMPARE(titles(store, buildRows(store, View{View::List, listId, {}}, options)),
-                     (QStringList{"Book the cabin", "Water the plants"}));
-            ReminderModel model(&store);
-            model.show(buildRows(store, View{View::List, listId, {}}, options), true);
-            QCOMPARE(model.data(model.index(model.rowOf(cabinId)), ReminderModel::ParentTitleRole).toString(),
-                     QString("Trip"));
-        }
+        // On its own, where its parent would be, and saying whose it is.
+        QCOMPARE(titles(store, buildRows(store, View{View::List, listId, {}}, options)),
+                 (QStringList{"Book the cabin", "Water the plants"}));
+        ReminderModel model(&store);
+        model.show(buildRows(store, View{View::List, listId, {}}, options), true);
+        QCOMPARE(model.data(model.index(model.rowOf(cabinId)), ReminderModel::ParentTitleRole).toString(),
+                 QString("Trip"));
         options.showCompleted = true;
         QCOMPARE(titles(store, buildRows(store, View{View::List, listId, {}}, options)),
                  (QStringList{"Trip", "  Book the cabin", "Water the plants"}));
