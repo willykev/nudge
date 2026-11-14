@@ -220,6 +220,185 @@ private slots:
         }
     }
 
+    // ---- dates (review fixes) ----
+
+private:
+    // Quick entry typed on the tests' Friday, at another time of day.
+    static QuickEntry typedAt(const QString &text, int hour, int minute = 0) {
+        return Dates::parseQuick(text, QDateTime(friday.date(), QTime(hour, minute)));
+    }
+
+private slots:
+    void tonightIsTheEveningAhead() {
+        // At seven in the evening, "tonight at 9" is two hours off, not ten hours gone.
+        QuickEntry entry = typedAt("Call mom tonight at 9", 19);
+        QCOMPARE(entry.title, QString("Call mom"));
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 21 * 60);
+        // Typed in the morning, it is not twelve hours early either.
+        QCOMPARE(typedAt("Call mom tonight at 9", 8).minutes, 21 * 60);
+        QCOMPARE(typedAt("Call mom at 9 tonight", 19).minutes, 21 * 60);
+        QCOMPARE(typedAt("Call mom tonight at 11:30", 19).minutes, 23 * 60 + 30);
+        entry = typedAt("Call mom this evening at 9", 19);
+        QCOMPARE(entry.title, QString("Call mom"));
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 21 * 60);
+        entry = typedAt("Movie this evening", 10);
+        QCOMPARE(entry.title, QString("Movie"));
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 20 * 60);
+
+        // A time that says which half of the day it is keeps it.
+        QCOMPARE(typedAt("Call mom tonight at 5", 10).minutes, 17 * 60);
+        QCOMPARE(typedAt("Call mom tonight at 7pm", 10).minutes, 19 * 60);
+        QCOMPARE(typedAt("Call mom tonight at 21:30", 10).minutes, 21 * 60 + 30);
+        // Midnight and the small hours end the night, on the next day.
+        entry = typedAt("Lock up tonight at midnight", 19);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 0);
+        entry = typedAt("Lock up tonight at 12", 19);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 0);
+        entry = typedAt("Check the oven tonight at 1am", 19);
+        QCOMPARE(entry.due, friday.date().addDays(1));
+        QCOMPARE(entry.minutes, 60);
+        // Still up after midnight, tonight is the night that is not over yet.
+        entry = typedAt("Check the oven tonight at 1", 0, 30);
+        QCOMPARE(entry.due, friday.date());
+        QCOMPARE(entry.minutes, 60);
+
+        // A new reminder's line reads it that way as it is typed.
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        backend.setClock([] { return QDateTime(friday.date(), QTime(19, 0)); });
+        QCOMPARE(backend.quickPreview("Call mom tonight at 9"),
+                 Dates::formatDue(friday.date(), 21 * 60, friday.date()));
+    }
+
+    void tonightAlertsInTheEvening() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        // A Friday evening still ahead, as the store dates its changes by the real clock.
+        const QDate day(2030, 5, 3);
+        backend.setClock([day] { return QDateTime(day, QTime(19, 0)); });
+        backend.setViewKey("list:" + QString::number(addList(store, "Home")));
+        const qint64 id = backend.addReminder();
+        backend.commitTitle(id, "Call mom tonight at 9");
+        QCOMPARE(store.reminder(id)->dueMinutes, 21 * 60);
+
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        notifier.check(QDateTime(day, QTime(20, 59)));
+        QCOMPARE(alerts.sent.size(), 0);
+        notifier.check(QDateTime(day, QTime(21, 0)));
+        QCOMPARE(alerts.sent.size(), 1);
+        QCOMPARE(alerts.sent.first().title, QString("Call mom"));
+    }
+
+    void aRepeatStartsAtItsNextMoment() {
+        // On a Friday evening, this Friday's nine o'clock has gone by.
+        QuickEntry entry = typedAt("Team sync every friday at 9", 19, 12);
+        QCOMPARE(entry.title, QString("Team sync"));
+        QCOMPARE(entry.repeat, QString("weekly:1"));
+        QCOMPARE(entry.due, QDate(2026, 11, 20));
+        QCOMPARE(entry.minutes, 9 * 60);
+        entry = typedAt("Team sync every other friday at 9", 19, 12);
+        QCOMPARE(entry.repeat, QString("weekly:2"));
+        QCOMPARE(entry.due, QDate(2026, 11, 20));
+        // Before nine, or without a time, it starts today.
+        QCOMPARE(typedAt("Team sync every friday at 9", 8).due, friday.date());
+        QCOMPARE(typedAt("Team sync every friday", 19, 12).due, friday.date());
+        QCOMPARE(typedAt("Team sync every monday at 9", 19, 12).due, QDate(2026, 11, 16));
+    }
+
+    void minutesKeepTheirHoursHalfOfTheDay() {
+        // "at 5:30" is read the way "at 5" is: in the afternoon.
+        QCOMPARE(typedAt("Call at 5:30", 10).minutes, 17 * 60 + 30);
+        QCOMPARE(typedAt("Call at 5", 10).minutes, 17 * 60);
+        QCOMPARE(typedAt("Call at 7:45", 10).minutes, 19 * 60 + 45);
+        QCOMPARE(typedAt("Call at 9:30", 8).minutes, 9 * 60 + 30);
+        QCOMPARE(typedAt("Call at 12:15", 8).minutes, 12 * 60 + 15);
+        QCOMPARE(typedAt("Call at 5:30am", 4).minutes, 5 * 60 + 30);
+        // The 24-hour clock means what it says.
+        QCOMPARE(typedAt("Call at 05:30", 4).minutes, 5 * 60 + 30);
+        QCOMPARE(typedAt("Call at 17:30", 10).minutes, 17 * 60 + 30);
+        QCOMPARE(typedAt("Call at 0:30", 10).minutes, 30);
+        // The time field reads them the same way.
+        QCOMPARE(Dates::parseTime("5:30"), 17 * 60 + 30);
+        QCOMPARE(Dates::parseTime("9:30"), 9 * 60 + 30);
+        QCOMPARE(Dates::parseTime("05:30"), 5 * 60 + 30);
+        QCOMPARE(Dates::parseTime("05"), 5 * 60);
+    }
+
+    void littleWordsStayInTheTitleUnlessTheDateHasThem() {
+        QuickEntry entry = typedAt("Finish this tomorrow", 10);
+        QCOMPARE(entry.title, QString("Finish this"));
+        QCOMPARE(entry.due, QDate(2026, 11, 14));
+        QCOMPARE(typedAt("Do this every day", 10).title, QString("Do this"));
+        QCOMPARE(typedAt("Read this next week", 10).title, QString("Read this"));
+        QCOMPARE(typedAt("Fix this dec 1", 10).title, QString("Fix this"));
+        QCOMPARE(typedAt("Follow up on this tomorrow", 10).title, QString("Follow up on this"));
+        QCOMPARE(typedAt("Move on tomorrow", 10).title, QString("Move on"));
+        QCOMPARE(typedAt("Stop by every friday", 10).title, QString("Stop by"));
+        QCOMPARE(typedAt("Stand by in 5 minutes", 10).title, QString("Stand by"));
+
+        // Where they are part of the date, they go with it.
+        entry = typedAt("Call mom this friday", 10);
+        QCOMPARE(entry.title, QString("Call mom"));
+        QCOMPARE(entry.due, QDate(2026, 11, 20));
+        entry = typedAt("Lunch on sun", 10);
+        QCOMPARE(entry.title, QString("Lunch"));
+        QCOMPARE(entry.due, QDate(2026, 11, 15));
+        QCOMPARE(typedAt("Send the report by tomorrow", 10).title, QString("Send the report"));
+        QCOMPARE(typedAt("Stay in until next week", 10).title, QString("Stay in"));
+        QCOMPARE(typedAt("Dinner on nov 20", 10).title, QString("Dinner"));
+        QCOMPARE(typedAt("Taxes due apr 15", 10).title, QString("Taxes"));
+        QCOMPARE(typedAt("Library books due in 3 days", 10).title, QString("Library books"));
+        QCOMPARE(typedAt("Rent due every month", 10).title, QString("Rent"));
+        // A date field has no title to keep them for.
+        QCOMPARE(Dates::parseDate("on tomorrow", friday.date()), QDate(2026, 11, 14));
+    }
+
+    void aNumberWithALetterIsNotAlwaysATime() {
+        // "2a" is a room, a seat, or a step as often as two in the morning.
+        QuickEntry entry = typedAt("Meet in room 2a tomorrow", 10);
+        QCOMPARE(entry.title, QString("Meet in room 2a"));
+        QCOMPARE(entry.due, QDate(2026, 11, 14));
+        QCOMPARE(entry.minutes, -1);
+        entry = typedAt("Swap seat 12a", 10);
+        QCOMPARE(entry.title, QString("Swap seat 12a"));
+        QVERIFY(!entry.due.isValid());
+        // After "at", or with its minutes, it is a time; and "7p" is the evening.
+        QCOMPARE(typedAt("Breakfast at 7a", 6).minutes, 7 * 60);
+        QCOMPARE(typedAt("Breakfast 7:30a", 6).minutes, 7 * 60 + 30);
+        QCOMPARE(typedAt("Dinner 7p", 10).minutes, 19 * 60);
+        QCOMPARE(Dates::parseTime("7a"), 7 * 60);
+    }
+
+    void aLeapDayIsTheNextOne() {
+        const QDate today = friday.date();
+        QCOMPARE(Dates::parseDate("2/29", today), QDate(2028, 2, 29));
+        QCOMPARE(Dates::parseDate("feb 29", today), QDate(2028, 2, 29));
+        QCOMPARE(Dates::parseDate("2/29", QDate(2028, 2, 29)), QDate(2028, 2, 29));
+        QCOMPARE(Dates::parseDate("2/29", QDate(2028, 3, 1)), QDate(2032, 2, 29));
+        QCOMPARE(Dates::parseQuick("Leap day party feb 29", friday).due, QDate(2028, 2, 29));
+        // Or the one in the year given, if there is one.
+        QCOMPARE(Dates::parseDate("2/29/2028", today), QDate(2028, 2, 29));
+        QVERIFY(!Dates::parseDate("2/29/2027", today).isValid());
+        QCOMPARE(Dates::parseQuick("Leap day party feb 29 2032", friday).due, QDate(2032, 2, 29));
+        // Other days come round once a year, as before.
+        QCOMPARE(Dates::parseDate("3/1", QDate(2028, 3, 2)), QDate(2029, 3, 1));
+        QCOMPARE(Dates::parseQuick("Leap day party feb 28", QDateTime(QDate(2028, 3, 1), QTime(10, 0))).due,
+                 QDate(2029, 2, 28));
+
+        // Where the day comes first.
+        QLocale::setDefault(QLocale(QLocale::German, QLocale::Germany));
+        QCOMPARE(Dates::parseDate("29.2.", today), QDate(2028, 2, 29));
+        QCOMPARE(Dates::parseDate("29/2", today), QDate(2028, 2, 29));
+    }
+
     // ---- The store ---------------------------------------------------------------
 
     void storeKeepsWhatItIsGiven() {
