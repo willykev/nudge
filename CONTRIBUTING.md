@@ -6,7 +6,7 @@ Bug reports, small improvements, and translations are welcome. Open an
 ## Build and test
 
 On Arch Linux, install `base-devel`, `qt6-base`, `qt6-declarative`, `qt6-svg`,
-and `qt6-wayland`. Sprawl also uses `xdg-desktop-portal` for file dialogs.
+and `qt6-wayland`.
 
 ```sh
 bin/build
@@ -33,12 +33,17 @@ git tag -a "v$release_version" -m "Release v$release_version"
 bin/release
 ```
 
-`bin/release` builds from the tagged source, runs the tests, and writes the
-source archive, Arch package, standalone `PKGBUILD`, and `SHA256SUMS` to
-`dist/v<VERSION>/`. It needs Python 3.12 or newer and Arch's `makepkg`.
-Packages are built for the current machine's architecture.
+`bin/release` writes the tagged source archive and the standalone `PKGBUILD`
+that downloads it to `dist/v<VERSION>/`, builds the Arch package from that
+`PKGBUILD` and archive, runs the tests, and writes `SHA256SUMS`. It needs
+Python 3.12 or newer and Arch's `makepkg`. Packages are built for the current
+machine's architecture.
 
 Maintainers can run `bin/release --publish` to push the commit and tag, set
 the GitHub description and topics, and publish the release with its assets.
-GitHub CLI authentication is required. Verified local assets are reused on
-retries; existing release assets are preserved.
+It needs the GitHub CLI, signed in with admin access to the repository.
+Before it pushes anything, it checks the release notes, the tag, GitHub
+access, and that the push will be accepted. Verified local assets are reused
+on retries, and assets already on the release must match them: one that
+differs stops the release before the push, so delete it from the release or
+restore the uploaded file, then retry.
