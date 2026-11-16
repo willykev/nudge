@@ -79,6 +79,24 @@ QHash<QString, QString> Look::readToml(const QString &path) {
     return values;
 }
 
+QString Look::themeFolder(const QString &asked, const QStringList &folders) {
+    if (asked.isEmpty())
+        return {};
+    QStringList candidates;
+    if (!asked.contains('/') && asked != "." && asked != "..") {
+        const QStringList kept = !folders.isEmpty() ? folders
+                                                    : QStringList{QDir::homePath() + "/.config/omarchy/themes",
+                                                                  "/usr/share/omarchy/themes"};
+        for (const QString &folder : kept)
+            candidates << folder + "/" + asked;
+    }
+    candidates << asked;
+    for (const QString &candidate : std::as_const(candidates))
+        if (QFile::exists(candidate + "/colors.toml"))
+            return QDir::cleanPath(QDir::current().absoluteFilePath(candidate));
+    return {};
+}
+
 Look::Look(const QString &directory, QObject *parent, const QString &hyprctl, const QString &hyprlandEvents,
            const QString &home)
     : QObject(parent), m_directory(directory.isEmpty() ? QDir::homePath() + "/.local/state/omarchy/current" : directory) {

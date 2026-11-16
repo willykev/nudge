@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — 2026-11-16
+
+A new README, with pictures drawn by Nudge itself.
+
+- The README shows Nudge at work: a list with its details, a reminder being
+  typed as Nudge reads its date, the Scheduled view, the calendar, and one
+  list in four themes. It adds a short tour, measured performance, and how
+  to update and remove Nudge.
+- `nudge open --screenshot` takes a window size (`--size`), an Omarchy theme
+  (`--theme`), a time to take it to be (`--now`), and words for a new
+  reminder to start with (`--type`), so a picture shows the same wherever
+  it is taken.
+- `bin/screenshots` redraws the README's pictures from the reminders in
+  `examples/week.json`, off screen.
+- The guide says how to update and remove Nudge and what to check when an
+  alert does not arrive, and leaves building to `CONTRIBUTING.md`.
+
 ## 0.1.2 — 2026-11-14
 
 - Renaming a reminder that is scrolled out of view no longer stops as soon

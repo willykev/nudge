@@ -63,7 +63,13 @@ bin/install
 This builds Nudge and installs it as an Arch package (`makepkg -fsi`), so it
 shows up in the Omarchy app launcher (`Super + Space`). It needs `qmake6`,
 `make`, a C++ compiler, and Qt's base, declarative, SVG, and Wayland modules,
-all of which are part of Omarchy.
+all of which are part of Omarchy. The package is named `nudge-reminders`; the
+command is `nudge`.
+
+To update, run `git pull` and `bin/install` again. To remove Nudge, run
+`nudge background off` and then `sudo pacman -R nudge-reminders`. Your
+reminders stay in `~/.local/share/nudge/`; delete that folder to remove them
+too.
 
 ## Shortcuts
 
@@ -144,25 +150,15 @@ a date the way the language writes it or pick one from the calendar.
 
 The window is translated into Danish, Dutch, French, German, Italian,
 Portuguese (Brazil), Spanish (Mexico), and Swedish, and is in English
-otherwise. A catalog is one JSON file in `src/i18n/`, listed in
-`src/resources.qrc`.
+otherwise.
 
-## Working on it
+## Troubleshooting
 
-```sh
-bin/build      # qmake6 and make, into build/nudge
-bin/test       # the Qt Test suite, offscreen
-bin/install    # build the package and install it
-```
+**No alert arrived while the window was closed.** Alerts arrive with the
+window closed only once the background service is on: press `B` in the
+window or run `nudge background on`. `systemctl --user status nudge.service`
+says whether it is running.
 
-`build/nudge open` runs the window from the build directory.
-
-The omarchy-app skill's template uses Qt's Material style with the theme's
-accent. Nudge goes further toward the desktop, as Hype does: the Basic style
-under its own small set of controls (`src/InputField.qml`, `Dropdown.qml`,
-`Toggle.qml`, `PushButton.qml`, `AppMenu.qml`), all drawn from `src/look.cpp`.
-
-## License
-
-MIT. Parts come from Omacut, Monologue, and Hype by David Heinemeier Hansson,
-and one icon from Feather by Cole Bemis; see [LICENSE](../LICENSE).
+**A date was not picked out of what I typed.** Typed dates are read in
+English. Press `D` to type the date on its own, or pick one from the
+calendar in the details.

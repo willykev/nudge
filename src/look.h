@@ -46,6 +46,12 @@ public:
                   const QString &hyprlandEvents = {}, const QString &home = {});
     ~Look() override;
 
+    // The folder of the Omarchy theme a picture asks for (nudge open
+    // --theme), or nothing when there is none. A name is one of the themes,
+    // the person's own before those Omarchy comes with, and never a way out
+    // of them; anything else is a path. A test says where themes are kept.
+    static QString themeFolder(const QString &asked, const QStringList &folders = {});
+
     QVariantMap colors() const { return m_colors; }
     QVariantMap swatches() const { return m_swatches; }
     QStringList swatchNames() const;

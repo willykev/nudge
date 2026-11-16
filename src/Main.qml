@@ -129,6 +129,19 @@ ApplicationWindow {
         if (id)
             editingId = id
     }
+    // Starts a new reminder with these words typed in it, for pictures of
+    // one being written (nudge open --type). They go in once the row has
+    // its field, which it sets up as it starts.
+    property string typed: ""
+    function type(words) {
+        typed = words
+        newReminder()
+    }
+    onActiveEditorChanged: if (activeEditor && typed !== "") Qt.callLater(() => {
+        if (activeEditor)
+            activeEditor.text = typed
+        typed = ""
+    })
     function editTitle() {
         const row = backend.selectedRow
         if (row < 0)

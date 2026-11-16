@@ -2,6 +2,8 @@
 // subtasks, and a nudge when something is due.
 
 #include <QCommandLineParser>
+#include <QDateTime>
+#include <QFile>
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
@@ -10,6 +12,8 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QStyleHints>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QUrl>
 #include <cstdio>
@@ -86,6 +90,13 @@ int main(int argc, char *argv[]) {
     args.addOption({"help-overlay", "Start with the shortcuts showing"});
     args.addOption({"show", "Start with a dialog open: list, date, move, menu, delete", "dialog"});
     args.addOption({"screenshot", "Save a picture of the window and exit", "file"});
+    // What a picture shows, so that it shows the same wherever it is taken.
+    args.addOption({"size", "With --screenshot: the size of the window", "WxH"});
+    args.addOption({"theme",
+                    "With --screenshot: an Omarchy theme to show instead of the default: its name, or its folder",
+                    "theme"});
+    args.addOption({"now", "With --screenshot: the time to take it to be, like 2026-11-16T09:41", "time"});
+    args.addOption({"type", "With --screenshot: start a new reminder with these words typed", "words"});
     args.addOption({"new-window", "Open another window even when one is open"});
     args.process(app);
 
@@ -99,9 +110,27 @@ int main(int argc, char *argv[]) {
     // own components, in the colors and states of the Omarchy theme.
     QQuickStyle::setStyle("Basic");
 
-    // A screenshot shows Omarchy's default look, whatever theme is on.
-    Theme theme(screenshot ? QString("/nonexistent") : QString());
-    Look look(screenshot ? QString("/nonexistent") : QString());
+    // A screenshot shows Omarchy's default look, whatever theme is on, or
+    // the theme it asks for as that theme ships: a folder stands in for
+    // Omarchy's own, with that theme as the current one.
+    QTemporaryDir stand;
+    QString showing;
+    if (screenshot) {
+        showing = "/nonexistent";
+        if (args.isSet("theme")) {
+            const QString asked = args.value("theme");
+            const QString found = Look::themeFolder(asked);
+            if (found.isEmpty() || !QFile::link(found, stand.filePath("theme"))) {
+                fprintf(stderr, "nudge: there is no theme %s\n", qPrintable(asked));
+                return 1;
+            }
+            showing = stand.path();
+        }
+        // A field being typed in shows its caret, not a blink caught off.
+        QGuiApplication::styleHints()->setCursorFlashTime(0);
+    }
+    Theme theme(showing);
+    Look look(showing);
 
     // The Omarchy font: "monospace" is the alias `omarchy font set` points at
     // the chosen family, at the size the theme gives the shell.
@@ -117,6 +146,14 @@ int main(int argc, char *argv[]) {
     store.watch();
     DesktopAlerts alerts(false);
     Backend backend(&store);
+    if (screenshot && args.isSet("now")) {
+        const QDateTime now = QDateTime::fromString(args.value("now"), Qt::ISODate);
+        if (!now.isValid()) {
+            fprintf(stderr, "nudge: %s is not a time like 2026-11-16T09:41\n", qPrintable(args.value("now")));
+            return 1;
+        }
+        backend.setClock([now] { return now; });
+    }
     if (args.isSet("view"))
         backend.setViewKey(args.value("view"));
     if (!screenshot)
@@ -138,12 +175,21 @@ int main(int argc, char *argv[]) {
         return 1;
 
     QObject *window = engine.rootObjects().first();
+    if (screenshot && args.isSet("size")) {
+        const QStringList parts = args.value("size").split('x');
+        if (parts.size() == 2 && parts[0].toInt() > 0 && parts[1].toInt() > 0) {
+            window->setProperty("width", parts[0].toInt());
+            window->setProperty("height", parts[1].toInt());
+        }
+    }
     if (args.isSet("details"))
         window->setProperty("detailsVisible", true);
     if (args.isSet("help-overlay"))
         window->setProperty("helpVisible", true);
     if (args.isSet("show"))
         QMetaObject::invokeMethod(window, "show", Q_ARG(QVariant, args.value("show")));
+    if (screenshot && args.isSet("type"))
+        QMetaObject::invokeMethod(window, "type", Q_ARG(QVariant, args.value("type")));
     if (screenshot) {
         QTimer::singleShot(900, &app, [&] {
             auto *quick = qobject_cast<QQuickWindow *>(window);

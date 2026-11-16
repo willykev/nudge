@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Redraw the README's pictures into screenshots/.
+
+Every picture is drawn by Nudge itself, off screen, from the reminders in
+examples/week.json, as they stand on the morning of Monday 16 November 2026.
+No window opens and no alert is sent, and nothing of your own is read or
+shown: the reminders, the theme and the settings all come from a scratch
+folder that goes away afterwards, and the theme is Omarchy's as it ships.
+
+Run it after changing how Nudge looks, and before a release. A picture that
+looks the same as the one already there is left alone, so only what changed
+shows up in git. It needs ImageMagick, ffmpeg, and Omarchy's themes for
+themes.png.
+"""
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+APP = ROOT / "build/nudge"
+OUT = ROOT / "screenshots"
+EXAMPLE = ROOT / "examples/week.json"
+# The moment the pictures are taken at, so "Today" and "Tomorrow" stay put.
+NOW = "2026-11-16T09:41"
+# What is typed in typing.gif. The example already holds this reminder, so
+# the loop is drawn without it.
+WORDS = "Call the dentist tomorrow at 9 #health"
+THEMES = ["tokyo-night", "catppuccin-latte", "gruvbox", "rose-pine"]
+# The window sizes, in the pixels of a screen at normal scale; the window's
+# own is 1120x720. Pictures are drawn at twice that, so they stay sharp where
+# GitHub scales them down; the four in themes.png at a scale that makes each
+# 1280 pixels wide.
+CLOSE = "960x600"
+TILE = "880x550"
+HOME_LIST = "list:1"
+
+
+class Stage:
+    """A scratch home with the example's reminders, and Nudge drawing there."""
+
+    def __init__(self, scratch):
+        self.scratch = Path(scratch)
+        (self.scratch / "home").mkdir()
+        self.database = self.scratch / "nudge.db"
+        self.env = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(self.scratch / "home"),
+            "LANG": "C.UTF-8",
+            "TZ": "UTC",
+            "NUDGE_DB": str(self.database),
+            # Off screen, drawn by the processor, and out of reach of the
+            # desktop: no window, no alert, the same picture on any machine.
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_QUICK_BACKEND": "software",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent",
+        }
+        example = json.loads(EXAMPLE.read_text())
+        self.whole = self.reminders(example, "whole")
+        example["reminders"] = [r for r in example["reminders"] if not WORDS.startswith(r["title"])]
+        self.before = self.reminders(example, "before")
+
+    def nudge(self, *args, scale=2):
+        subprocess.run([str(APP), *map(str, args)], env=dict(self.env, QT_SCALE_FACTOR=f"{scale:g}"),
+                       check=True, stdout=subprocess.DEVNULL)
+
+    def reminders(self, export, name):
+        """A database holding an export, settled as a window in use would be:
+        completed reminders showing, the offer of the background service
+        already answered."""
+        source = self.scratch / f"{name}.json"
+        source.write_text(json.dumps(export))
+        self.clear()
+        self.nudge("import", source)
+        kept = self.scratch / f"{name}.db"
+        with closing(sqlite3.connect(self.database)) as held, closing(sqlite3.connect(kept)) as copy:
+            held.executemany("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                             [("show_completed", "1"), ("background_asked", "1")])
+            held.commit()
+            held.backup(copy)
+        return kept
+
+    def clear(self):
+        """Takes the database away, with what SQLite keeps beside it."""
+        for left in self.scratch.glob("nudge.db*"):
+            left.unlink()
+
+    def draw(self, picture, *options, size=None, scale=2, reminders=None):
+        """One picture of the window, on a fresh copy of the reminders."""
+        self.clear()
+        shutil.copy(reminders or self.whole, self.database)
+        where = ["--size", size] if size else []
+        self.nudge("open", "--now", NOW, *where, *options, "--screenshot", picture, scale=scale)
+
+
+def typing(stage, picture):
+    """A loop: a reminder is typed, and Nudge reads the date, time and tag."""
+    frames = stage.scratch / "frames"
+    frames.mkdir()
+    steps = [""] * 6 + [WORDS[:end] for end in range(1, len(WORDS) + 1)] + [WORDS] * 20
+    drawn = {}
+    for number, words in enumerate(steps):
+        frame = frames / f"{number:03}.png"
+        if words in drawn:
+            shutil.copy(drawn[words], frame)
+            continue
+        stage.draw(frame, "--view", HOME_LIST, "--type", words, size=CLOSE, reminders=stage.before)
+        drawn[words] = frame
+    width = CLOSE.split("x")[0]
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-framerate", "12", "-i", str(frames / "%03d.png"),
+         "-vf", f"scale={width}:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];"
+                "[b][p]paletteuse=dither=none:diff_mode=rectangle",
+         "-loop", "0", str(picture)], check=True)
+
+
+def themes(stage, picture):
+    """The same list in four themes, two by two."""
+    tiles = []
+    for theme in THEMES:
+        tiles.append(stage.scratch / f"{theme}.png")
+        stage.draw(tiles[-1], "--view", HOME_LIST, "--theme", theme, size=TILE,
+                   scale=1280 / int(TILE.split("x")[0]))
+    subprocess.run(["magick", "montage", *map(str, tiles), "-tile", "2x2", "-geometry", "+12+12",
+                    "-background", "none", "-depth", "8", "-strip", str(picture)], check=True)
+
+
+def settle(drawn, kept, scratch):
+    """Put a newly drawn picture in place, unless the one already there looks
+    the same. Says whether it changed."""
+    if kept.exists():
+        pair = [kept, drawn]
+        tolerance = 0
+        if kept.suffix == ".gif":
+            # Every frame of each, one under the other.
+            pair = [scratch / "kept.png", scratch / "drawn.png"]
+            for loop, frames in zip((kept, drawn), pair):
+                subprocess.run(["magick", str(loop), "-coalesce", "-append", str(frames)], check=True)
+            tolerance = 5e-5
+        result = subprocess.run(["magick", "compare", "-metric", "AE", "-fuzz", "2%",
+                                 *map(str, pair), "null:"], capture_output=True, text=True)
+        differing = re.search(r"\(([^)]+)\)", result.stderr)
+        if result.returncode in (0, 1) and differing and float(differing.group(1)) <= tolerance:
+            return False
+    shutil.move(drawn, kept)
+    return True
+
+
+def main():
+    for tool in ("magick", "ffmpeg"):
+        if not shutil.which(tool):
+            sys.exit(f"screenshots: {tool} is needed, and is not installed")
+    subprocess.run([str(ROOT / "bin/build")], check=True, stdout=subprocess.DEVNULL)
+    OUT.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nudge-screenshots-") as scratch:
+        stage = Stage(scratch)
+        drawn = stage.scratch / "drawn"
+        drawn.mkdir()
+        stage.draw(drawn / "hero.png", "--view", HOME_LIST, "--details")
+        typing(stage, drawn / "typing.gif")
+        stage.draw(drawn / "scheduled.png", "--view", "scheduled", size=CLOSE)
+        stage.draw(drawn / "calendar.png", "--view", HOME_LIST, "--show", "date", size=CLOSE)
+        themes(stage, drawn / "themes.png")
+        for picture in sorted(drawn.iterdir()):
+            kept = OUT / picture.name
+            changed = settle(picture, kept, stage.scratch)
+            print(f"{kept.relative_to(ROOT)}  {kept.stat().st_size // 1024} KB  "
+                  f"{'redrawn' if changed else 'unchanged'}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        sys.exit(f"screenshots: {error}")

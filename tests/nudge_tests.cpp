@@ -3229,6 +3229,40 @@ private slots:
         QCOMPARE(fetched, QStringList{"/sentinel"});
     }
 
+    // A picture of a reminder being written (nudge open --type): the window
+    // starts a new one with the words in its field, read as they would be
+    // had they been typed, and Return keeps it as it reads.
+    void aNewReminderCanStartWithWordsTyped() {
+        QmlWindow w;
+        const qint64 listId = addList(w.store, "Home");
+        w.backend.setViewKey("list:" + QString::number(listId));
+        QVERIFY(w.open());
+        const QString words = "Call the dentist tomorrow at 9 #health";
+        QVERIFY(QMetaObject::invokeMethod(w.window, "type", Q_ARG(QVariant, QVariant(words))));
+        QTRY_VERIFY(w.editingId() > 0);
+        const auto typed = [&w] {
+            auto *editor = w.window->property("activeEditor").value<QObject *>();
+            return editor ? editor->property("text").toString() : QString();
+        };
+        QTRY_COMPARE(typed(), words);
+        QCOMPARE(w.window->property("typed").toString(), QString());
+        const QString reading = w.backend.quickPreview(typed());
+        QVERIFY2(reading.startsWith("Tomorrow, 9:00") && reading.endsWith("#health"), qPrintable(reading));
+
+        const qint64 id = w.editingId();
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTest::keyClick(w.window, Qt::Key_Escape);
+        QTRY_COMPARE(w.editingId(), 0);
+        const Reminder *kept = w.store.reminder(id);
+        QVERIFY(kept);
+        QCOMPARE(kept->title, QString("Call the dentist"));
+        QCOMPARE(kept->due, friday.date().addDays(1));
+        QCOMPARE(kept->dueMinutes, 9 * 60);
+        QCOMPARE(kept->tags, QStringList{"health"});
+        QCOMPARE(w.store.reminders().size(), 1);
+        QVERIFY2(w.warnings.isEmpty(), qPrintable(w.warnings.join('\n')));
+    }
+
     // What is typed in the details is saved to the reminder it was typed
     // for, whatever moves the selection meanwhile, and never to the next one.
     void detailsSaveTypingToItsOwnReminder() {
@@ -4069,6 +4103,27 @@ private slots:
         QCOMPARE(look.swatchNames().size(), 8);
         for (const QString &name : look.swatchNames())
             QVERIFY2(look.swatches().value(name).value<QColor>().isValid(), qPrintable(name));
+    }
+
+    // A picture can ask for a theme by name (nudge open --theme). It is
+    // found among the themes, the person's own before Omarchy's, and a name
+    // is never a way out of them; a folder is given by its path.
+    void aThemeAskedForIsFoundAmongTheThemes() {
+        QTemporaryDir dir;
+        const QDir root(dir.path());
+        for (const QString &theme : QStringList{"own/nord", "shipped/nord", "shipped/gruvbox"}) {
+            QVERIFY(root.mkpath(theme));
+            QFile colors(root.filePath(theme + "/colors.toml"));
+            QVERIFY(colors.open(QIODevice::WriteOnly));
+        }
+        const QStringList kept{root.filePath("own"), root.filePath("shipped")};
+        QCOMPARE(Look::themeFolder("nord", kept), root.filePath("own/nord"));
+        QCOMPARE(Look::themeFolder("gruvbox", kept), root.filePath("shipped/gruvbox"));
+        QCOMPARE(Look::themeFolder(root.filePath("shipped/nord"), kept), root.filePath("shipped/nord"));
+        QCOMPARE(Look::themeFolder("rose-pine", kept), QString());
+        QCOMPARE(Look::themeFolder("", kept), QString());
+        QCOMPARE(Look::themeFolder("..", kept), QString());
+        QCOMPARE(Look::themeFolder("own", {root.path()}), QString()); // a folder of themes is not a theme
     }
 
     void theLookTakesTheWholeThemePalette() {

@@ -18,6 +18,16 @@ The tests run offscreen with temporary data. Keep changes focused, add a
 regression test for a bug fix, and describe how you checked the result in
 your pull request. Follow the surrounding C++ and QML style.
 
+Nudge uses Qt's Basic style under its own small set of controls
+(`src/InputField.qml`, `Dropdown.qml`, `Toggle.qml`, `PushButton.qml`,
+`AppMenu.qml`), all drawn from `src/look.cpp`. A translation is one JSON
+file in `src/i18n/`, listed in `src/resources.qrc`.
+
+`bin/screenshots` redraws the README's pictures from `examples/week.json`,
+off screen, in Omarchy's default theme and at a fixed date. Run it after
+changing how Nudge looks, and commit the pictures with the change. It needs
+ImageMagick and ffmpeg.
+
 The [full guide](docs/guide.md) covers the app's behavior and data format.
 Contributions use the project's [MIT license](LICENSE).
 
