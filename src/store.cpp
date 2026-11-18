@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QSet>
 #include <QSqlError>
@@ -15,6 +16,110 @@ namespace {
 QString isoDate(const QDate &date) { return date.isValid() ? date.toString(Qt::ISODate) : QString(); }
 QDate fromIso(const QString &text) { return text.isEmpty() ? QDate() : QDate::fromString(text, Qt::ISODate); }
 QVariant idOrNull(qint64 id) { return id ? QVariant(id) : QVariant(QMetaType::fromType<qint64>()); }
+
+const char *const reminderColumns =
+    "id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
+    "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
+    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at";
+
+Reminder reminderFrom(const QSqlQuery &query) {
+    Reminder r;
+    int i = 0;
+    r.id = query.value(i++).toLongLong();
+    r.listId = query.value(i++).toLongLong();
+    r.sectionId = query.value(i++).toLongLong();
+    r.parentId = query.value(i++).toLongLong();
+    r.title = query.value(i++).toString();
+    r.notes = query.value(i++).toString();
+    r.url = query.value(i++).toString();
+    r.due = fromIso(query.value(i++).toString());
+    r.dueMinutes = query.value(i++).toInt();
+    r.repeat = query.value(i++).toString();
+    r.repeatEnd = fromIso(query.value(i++).toString());
+    r.early = query.value(i++).toInt();
+    r.priority = query.value(i++).toInt();
+    r.flagged = query.value(i++).toBool();
+    r.tags = query.value(i++).toString().split(' ', Qt::SkipEmptyParts);
+    r.completed = query.value(i++).toBool();
+    r.completedAt = query.value(i++).toLongLong();
+    r.createdAt = query.value(i++).toLongLong();
+    r.modifiedAt = query.value(i++).toLongLong();
+    r.position = query.value(i++).toDouble();
+    r.alertedDue = query.value(i++).toLongLong();
+    r.alertedEarly = query.value(i++).toLongLong();
+    r.snoozeUntil = query.value(i++).toLongLong();
+    r.scheduledAt = query.value(i++).toLongLong();
+    return r;
+}
+
+TaskList listFrom(const QSqlQuery &query) {
+    TaskList list;
+    list.id = query.value(0).toLongLong();
+    list.name = query.value(1).toString();
+    list.color = query.value(2).toString();
+    list.position = query.value(3).toDouble();
+    list.sort = query.value(4).toString();
+    return list;
+}
+
+Section sectionFrom(const QSqlQuery &query) {
+    Section section;
+    section.id = query.value(0).toLongLong();
+    section.listId = query.value(1).toLongLong();
+    section.name = query.value(2).toString();
+    section.position = query.value(3).toDouble();
+    return section;
+}
+
+// What `after` changed of `before`, on top of `current`: each field this
+// process changed takes its value, and every other field stays as another
+// process left it. A field that goes with another moves with it.
+#define TAKE(field) if (after.field != before.field) merged.field = after.field
+#define TAKE2(a, b)                                                                                                    \
+    if (after.a != before.a || after.b != before.b) {                                                                  \
+        merged.a = after.a;                                                                                            \
+        merged.b = after.b;                                                                                            \
+    }
+Reminder rebased(const Reminder &current, const Reminder &before, const Reminder &after) {
+    Reminder merged = current;
+    TAKE(listId);
+    TAKE(sectionId);
+    TAKE(parentId);
+    TAKE(title);
+    TAKE(notes);
+    TAKE(url);
+    TAKE2(due, dueMinutes);
+    TAKE2(repeat, repeatEnd);
+    TAKE(early);
+    TAKE(priority);
+    TAKE(flagged);
+    TAKE(tags);
+    TAKE2(completed, completedAt);
+    TAKE(position);
+    TAKE(alertedDue);
+    TAKE(alertedEarly);
+    TAKE(snoozeUntil);
+    return merged;
+}
+
+TaskList rebased(const TaskList &current, const TaskList &before, const TaskList &after) {
+    TaskList merged = current;
+    TAKE(name);
+    TAKE(color);
+    TAKE(position);
+    TAKE(sort);
+    return merged;
+}
+
+Section rebased(const Section &current, const Section &before, const Section &after) {
+    Section merged = current;
+    TAKE(listId);
+    TAKE(name);
+    TAKE(position);
+    return merged;
+}
+#undef TAKE
+#undef TAKE2
 } // namespace
 
 bool Reminder::sameContent(const Reminder &other) const {
@@ -52,10 +157,17 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
     connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_reload.start(); });
     connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_reload.start(); });
 
-    if (!QDir().mkpath(QFileInfo(m_path).absolutePath())) {
-        fail(QString("Could not create %1").arg(QFileInfo(m_path).absolutePath()));
+    const QString folder = QFileInfo(m_path).absolutePath();
+    const bool newFolder = !QFileInfo::exists(folder);
+    if (!QDir().mkpath(folder)) {
+        fail(QString("Could not create %1").arg(folder));
         return;
     }
+    // What is written down here is the person's own: the folder Nudge makes,
+    // or its own one, is theirs alone, and so is the file.
+    if (newFolder || QFileInfo(defaultPath()).absolutePath() == folder)
+        QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    keepPrivate();
     m_db = QSqlDatabase::addDatabase("QSQLITE", m_connection);
     m_db.setDatabaseName(m_path);
     // The window, the command line, and the background alerts may all write.
@@ -86,7 +198,13 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
             "completed INTEGER NOT NULL DEFAULT 0, completed_at INTEGER NOT NULL DEFAULT 0,"
             "created_at INTEGER NOT NULL DEFAULT 0, modified_at INTEGER NOT NULL DEFAULT 0,"
             "position REAL NOT NULL DEFAULT 0, alerted_due INTEGER NOT NULL DEFAULT 0,"
-            "alerted_early INTEGER NOT NULL DEFAULT 0, snooze_until INTEGER NOT NULL DEFAULT 0)") &&
+            "alerted_early INTEGER NOT NULL DEFAULT 0, snooze_until INTEGER NOT NULL DEFAULT 0,"
+            "scheduled_at INTEGER NOT NULL DEFAULT 0)") &&
+        // Files from Nudge 0.1.3 and earlier: until a reminder is given a
+        // moment anew, it was last given one when it was last changed.
+        (hasColumn("reminders", "scheduled_at") ||
+         (run("ALTER TABLE reminders ADD COLUMN scheduled_at INTEGER NOT NULL DEFAULT 0") &&
+          run("UPDATE reminders SET scheduled_at = modified_at"))) &&
         run("CREATE INDEX IF NOT EXISTS reminders_by_list ON reminders (list_id)") &&
         run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)") &&
         // Set only when it differs: any write tells every other process the
@@ -123,6 +241,32 @@ bool Store::run(const QString &sql) {
     return false;
 }
 
+bool Store::hasColumn(const QString &table, const QString &column) {
+    QSqlQuery query(m_db);
+    if (!query.exec(QString("PRAGMA table_info(%1)").arg(table)))
+        return false;
+    while (query.next())
+        if (query.value(1).toString() == column)
+            return true;
+    return false;
+}
+
+// The file, and the two SQLite keeps beside it (which it makes with the
+// file's own permissions), are made readable by their owner alone. A file
+// that is not there yet is made empty first, so it never exists otherwise.
+void Store::keepPrivate() {
+    const auto own = QFile::ReadOwner | QFile::WriteOwner;
+    QFile file(m_path);
+    if (!QFileInfo::exists(m_path) && file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        file.setPermissions(own);
+        file.close();
+    }
+    // Files an earlier Nudge made readable by everyone are made private too.
+    for (const QString &path : {m_path, m_path + "-wal", m_path + "-shm"})
+        if (QFileInfo(path).isFile())
+            QFile::setPermissions(path, own);
+}
+
 void Store::fail(const QString &message) {
     m_error = message;
     emit failed(message);
@@ -131,10 +275,9 @@ void Store::fail(const QString &message) {
 void Store::prepare() {
     m_putReminder = QSqlQuery(m_db);
     m_putReminder.prepare(
-        "INSERT OR REPLACE INTO reminders (id, list_id, section_id, parent_id, title, notes, url, due,"
-        "due_minutes, repeat, repeat_end, early, priority, flagged, tags, completed, completed_at,"
-        "created_at, modified_at, position, alerted_due, alerted_early, snooze_until)"
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        QString("INSERT OR REPLACE INTO reminders (%1) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .arg(QLatin1String(reminderColumns)));
     m_putList = QSqlQuery(m_db);
     m_putList.prepare("INSERT OR REPLACE INTO lists (id, name, color, position, sort) VALUES (?, ?, ?, ?, ?)");
     m_putSection = QSqlQuery(m_db);
@@ -156,59 +299,20 @@ bool Store::load() {
     bool ok = reading && query.exec("PRAGMA data_version") && query.next();
     const qint64 version = ok ? query.value(0).toLongLong() : 0;
     if (ok && query.exec("SELECT id, name, color, position, sort FROM lists")) {
-        while (query.next()) {
-            TaskList list;
-            list.id = query.value(0).toLongLong();
-            list.name = query.value(1).toString();
-            list.color = query.value(2).toString();
-            list.position = query.value(3).toDouble();
-            list.sort = query.value(4).toString();
-            lists.append(list);
-        }
+        while (query.next())
+            lists.append(listFrom(query));
     }
     ok = ok && !query.lastError().isValid();
     if (m_loadHook)
         m_loadHook();
     if (ok && query.exec("SELECT id, list_id, name, position FROM sections")) {
-        while (query.next()) {
-            Section section;
-            section.id = query.value(0).toLongLong();
-            section.listId = query.value(1).toLongLong();
-            section.name = query.value(2).toString();
-            section.position = query.value(3).toDouble();
-            sections.append(section);
-        }
+        while (query.next())
+            sections.append(sectionFrom(query));
     }
     ok = ok && !query.lastError().isValid();
-    if (ok && query.exec("SELECT id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
-                         "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
-                         "modified_at, position, alerted_due, alerted_early, snooze_until FROM reminders")) {
+    if (ok && query.exec(QString("SELECT %1 FROM reminders").arg(QLatin1String(reminderColumns)))) {
         while (query.next()) {
-            Reminder r;
-            int i = 0;
-            r.id = query.value(i++).toLongLong();
-            r.listId = query.value(i++).toLongLong();
-            r.sectionId = query.value(i++).toLongLong();
-            r.parentId = query.value(i++).toLongLong();
-            r.title = query.value(i++).toString();
-            r.notes = query.value(i++).toString();
-            r.url = query.value(i++).toString();
-            r.due = fromIso(query.value(i++).toString());
-            r.dueMinutes = query.value(i++).toInt();
-            r.repeat = query.value(i++).toString();
-            r.repeatEnd = fromIso(query.value(i++).toString());
-            r.early = query.value(i++).toInt();
-            r.priority = query.value(i++).toInt();
-            r.flagged = query.value(i++).toBool();
-            r.tags = query.value(i++).toString().split(' ', Qt::SkipEmptyParts);
-            r.completed = query.value(i++).toBool();
-            r.completedAt = query.value(i++).toLongLong();
-            r.createdAt = query.value(i++).toLongLong();
-            r.modifiedAt = query.value(i++).toLongLong();
-            r.position = query.value(i++).toDouble();
-            r.alertedDue = query.value(i++).toLongLong();
-            r.alertedEarly = query.value(i++).toLongLong();
-            r.snoozeUntil = query.value(i++).toLongLong();
+            const Reminder r = reminderFrom(query);
             reminders.insert(r.id, r);
         }
     }
@@ -332,11 +436,11 @@ void Store::begin(const QString &mergeKey) {
     if (m_depth++ == 0) {
         m_pending = UndoEntry();
         m_pending.mergeKey = mergeKey;
-        // Outside a transaction each write would stand on its own, so none is tried.
-        if (!m_db.transaction()) {
-            fail(m_db.lastError().text());
+        // Outside a transaction each write would stand on its own, so none is
+        // tried. The write lock is taken at once: a row is read again before
+        // it is written (see rebase()), and nothing may change it in between.
+        if (!run("BEGIN IMMEDIATE"))
             m_broken = true;
-        }
     }
 }
 
@@ -428,6 +532,7 @@ bool Store::write(Reminder &r) {
     query.bindValue(i++, r.alertedDue);
     query.bindValue(i++, r.alertedEarly);
     query.bindValue(i++, r.snoozeUntil);
+    query.bindValue(i++, r.scheduledAt);
     if (!query.exec()) {
         fail(query.lastError().text());
         m_broken = true;
@@ -488,6 +593,63 @@ bool Store::erase(const char *table, qint64 id) {
     return false;
 }
 
+std::optional<Reminder> Store::fetchReminder(qint64 id) {
+    QSqlQuery query(m_db);
+    query.prepare(QString("SELECT %1 FROM reminders WHERE id = ?").arg(QLatin1String(reminderColumns)));
+    query.bindValue(0, id);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        m_broken = true;
+        return std::nullopt;
+    }
+    return query.next() ? std::optional<Reminder>(reminderFrom(query)) : std::nullopt;
+}
+
+std::optional<TaskList> Store::fetchList(qint64 id) {
+    QSqlQuery query(m_db);
+    query.prepare("SELECT id, name, color, position, sort FROM lists WHERE id = ?");
+    query.bindValue(0, id);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        m_broken = true;
+        return std::nullopt;
+    }
+    return query.next() ? std::optional<TaskList>(listFrom(query)) : std::nullopt;
+}
+
+std::optional<Section> Store::fetchSection(qint64 id) {
+    QSqlQuery query(m_db);
+    query.prepare("SELECT id, list_id, name, position FROM sections WHERE id = ?");
+    query.bindValue(0, id);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        m_broken = true;
+        return std::nullopt;
+    }
+    return query.next() ? std::optional<Section>(sectionFrom(query)) : std::nullopt;
+}
+
+template <typename T>
+bool Store::rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*fetch)(qint64)) {
+    if (m_broken)
+        return false;
+    if (!before)
+        return true;
+    const std::optional<T> current = (this->*fetch)(row.id);
+    if (m_broken)
+        return false;
+    if (!current) {
+        fail("It was deleted in another window or by a command, so the change was not saved.");
+        m_broken = true;
+        return false;
+    }
+    if (*current != *before) {
+        row = rebased(*current, *before, row);
+        before = current;
+    }
+    return true;
+}
+
 qint64 Store::put(Reminder r) {
     if (!m_open)
         return 0;
@@ -497,17 +659,22 @@ qint64 Store::put(Reminder r) {
     if (before && *before == r)
         return r.id;
 
+    begin();
+    if (!rebase(r, before, &Store::fetchReminder))
+        return commit() ? r.id : 0;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     if (!r.createdAt)
         r.createdAt = now;
     r.modifiedAt = now;
-    // A new date or time is a new moment to alert at.
-    if (before && (before->due != r.due || before->dueMinutes != r.dueMinutes))
+    // A new date or time is a new moment to alert at, given it now.
+    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes;
+    if (moved || before->early != r.early)
+        r.scheduledAt = now;
+    if (before && moved)
         r.alertedDue = r.alertedEarly = r.snoozeUntil = 0;
     else if (before && before->early != r.early)
         r.alertedEarly = 0;
 
-    begin();
     if (write(r)) {
         m_reminders.insert(r.id, r);
         m_pending.reminders.append({r.id, before, r});
@@ -532,7 +699,7 @@ qint64 Store::put(TaskList list) {
     if (before && *before == list)
         return list.id;
     begin();
-    if (write(list)) {
+    if (rebase(list, before, &Store::fetchList) && write(list)) {
         apply(list.id, std::optional<TaskList>(list));
         m_pending.lists.append({list.id, before, list});
     }
@@ -548,7 +715,7 @@ qint64 Store::put(Section section) {
     if (before && *before == section)
         return section.id;
     begin();
-    if (write(section)) {
+    if (rebase(section, before, &Store::fetchSection) && write(section)) {
         apply(section.id, std::optional<Section>(section));
         m_pending.sections.append({section.id, before, section});
     }
@@ -730,6 +897,11 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     } else if (r.snoozeUntil <= r.modifiedAt) {
         r.snoozeUntil = 0;
     }
+    // Given back another moment, it was given it just now.
+    if (current && current->due == r.due && current->dueMinutes == r.dueMinutes && current->early == r.early)
+        r.scheduledAt = current->scheduledAt;
+    else
+        r.scheduledAt = r.modifiedAt;
     if (!write(r))
         return;
     m_reminders.insert(id, r);

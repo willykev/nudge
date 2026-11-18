@@ -137,6 +137,12 @@ public:
     Q_INVOKABLE void removeSection(qint64 id);
     Q_INVOKABLE QString sectionName(qint64 id) const;
     Q_INVOKABLE int completedCount() const;
+    // What Delete Completed would take now, to ask about; and the deleting
+    // of what was asked about, as much of it as Delete Completed would
+    // still take. Never more than was asked about, whatever has been
+    // completed meanwhile, here or elsewhere.
+    Q_INVOKABLE QVariantList completedIds() const;
+    Q_INVOKABLE void clearCompleted(const QVariantList &asked);
     Q_INVOKABLE void clearCompleted();
 
     Q_INVOKABLE void undo();

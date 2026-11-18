@@ -154,8 +154,9 @@ the 0.9 seconds it waits before taking its picture.
 ## Your data
 
 Reminders live in `~/.local/share/nudge/nudge.db`, a SQLite file written on
-every change. `nudge export` writes everything as JSON and `nudge import`
-reads it back, for backups or for moving to another computer.
+every change, readable by you alone. `nudge export` writes everything as JSON
+and `nudge import` reads it back, for backups or for moving to another
+computer.
 
 Nudge makes no network connections. There is no sync between devices and no
 sharing of lists, and typed dates are read in English.

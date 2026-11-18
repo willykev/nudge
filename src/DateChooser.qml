@@ -95,6 +95,16 @@ Popup {
                 readonly property bool picked: iso === chooser.selectedIso
                 implicitWidth: 36
                 implicitHeight: 30
+                // Heard as the whole date, and chosen the way a click chooses it.
+                Accessible.role: Accessible.Button
+                Accessible.name: cell.model.date.toLocaleDateString(chooser.language, Locale.LongFormat)
+                Accessible.checkable: true
+                Accessible.checked: cell.picked
+                Accessible.onPressAction: cell.choose()
+                function choose() {
+                    backend.setDateIso(chooser.reminderId, cell.iso)
+                    chooser.close()
+                }
 
                 Rectangle {
                     anchors.centerIn: parent
@@ -116,12 +126,7 @@ Popup {
                     font.pixelSize: chooser.app.fsBody
                 }
                 HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler {
-                    onTapped: {
-                        backend.setDateIso(chooser.reminderId, cell.iso)
-                        chooser.close()
-                    }
-                }
+                TapHandler { onTapped: cell.choose() }
             }
         }
     }

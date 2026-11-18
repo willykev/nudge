@@ -198,14 +198,16 @@ ApplicationWindow {
                     qsTr("Its %n reminders are deleted with it. Undo brings them back.", "", info.total),
                     qsTr("Delete"), () => backend.removeList(id))
     }
+    // What is asked about is what is deleted: the reminders counted as the
+    // question goes up, not whatever has been completed by the answer.
     function clearCompleted() {
-        const count = backend.completedCount()
-        if (count === 0) {
+        const ids = backend.completedIds()
+        if (ids.length === 0) {
             say(qsTr("There are no completed reminders to delete"))
             return
         }
-        ask.confirm(qsTr("Delete %n completed reminders?", "", count), qsTr("Undo brings them back."),
-                    qsTr("Delete"), () => backend.clearCompleted())
+        ask.confirm(qsTr("Delete %n completed reminders?", "", ids.length), qsTr("Undo brings them back."),
+                    qsTr("Delete"), () => backend.clearCompleted(ids))
     }
     function newSection() {
         if (backend.viewKind !== "list") {

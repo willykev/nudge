@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a review of 0.1.3.
+
+### Saving
+
+- A window that has not caught up with another window or a command no
+  longer writes over what they changed: it saves only what it changed
+  itself. A reminder, list, or section deleted elsewhere is not made again
+  by a stale window; the change is refused, and the window says so.
+- A backup keeps lists and sections apart that have the same name (`Home`
+  and `HOME`, or two `Later` sections). Exports now carry each one's id, and
+  older exports still import. Imported lists are matched to existing ones
+  only once each.
+- Delete Completed deletes the reminders it asked about, not ones completed
+  while the question was up.
+
+### Alerts
+
+- Editing a reminder's notes, title, or anything but its date, time, or
+  early alert no longer silences an alert that is due. Nudge keeps when each
+  reminder was last given its moment, apart from when it was last edited.
+
+### Privacy
+
+- The data folder is made readable by its owner alone, and so are the
+  database, its journal files, and backups written by `nudge export`. Files
+  an earlier Nudge made readable by others are made private when opened.
+
+### Commands
+
+- Commands read times in the desktop's language, as the window does, so
+  `5:30` means the same in `nudge add` as in the window.
+- `nudge list today --list Home` lists what is due today in Home. `--list`,
+  `--tag`, and `--search` narrow a named view instead of replacing it.
+
+### Accessibility
+
+- A reminder's row, its completion checkbox, and the calendar's days are
+  exposed to screen readers, with names, states, and actions.
+
 ## 0.1.3 — 2026-11-16
 
 A new README, with pictures drawn by Nudge itself.

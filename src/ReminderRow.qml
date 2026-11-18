@@ -45,6 +45,20 @@ Item {
 
     width: ListView.view ? ListView.view.width : 0
     height: content.implicitHeight + 12 + nudge
+
+    // A screen reader hears the row as the list's item it is: its title,
+    // what it carries, and whether it is the one the keys act on.
+    Accessible.role: Accessible.ListItem
+    Accessible.name: title
+    Accessible.description: {
+        let said = ""
+        for (const part of [dueText, repeatText, tags, listName])
+            if (part !== "")
+                said += (said === "" ? "" : ", ") + part
+        return said
+    }
+    Accessible.selected: selected
+    Accessible.focusable: true
     // A row that grows while the rows below are still sliding into place (a
     // date read out of a title typed fast) is not made room for: the list
     // leaves rows in mid-slide alone, and nothing tells it to look again.
@@ -160,10 +174,21 @@ Item {
         // A box with the desktop's corners: square where windows are square,
         // round where they are round. One color, like the shell's controls.
         Rectangle {
+            id: box
             Layout.alignment: Qt.AlignTop
             Layout.topMargin: 1
             implicitWidth: 15
             implicitHeight: 15
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: qsTr("Completed")
+            Accessible.checkable: true
+            Accessible.checked: row.done
+            Accessible.onPressAction: box.toggle()
+            Accessible.onToggleAction: box.toggle()
+            function toggle() {
+                app.select(row.rid)
+                backend.toggleCompleted(row.rid)
+            }
             radius: Math.min(app.corner, 7.5)
             color: row.done ? app.chosen : boxHover.hovered ? app.cursorFill : "transparent"
             border.width: 1
@@ -182,7 +207,7 @@ Item {
             // A click here is a click on the row first, so a title being typed
             // is finished, and a new reminder settled, before the completion
             // is a step of its own.
-            TapHandler { onTapped: { app.select(row.rid); backend.toggleCompleted(row.rid) } }
+            TapHandler { onTapped: box.toggle() }
         }
 
         ColumnLayout {

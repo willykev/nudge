@@ -29,6 +29,12 @@ public:
     static QString readLanguage(const QString &path);
     static QString pluralCategory(const QString &language, long long count);
     static QLocale formatLocale(const QString &language);
+    // Where Omarchy keeps the language picked.
+    static QString defaultLanguageFile();
+    // Formats and reads dates and times as the window does, in the locale of
+    // the language picked (see formatLocale()), for what has no Translator:
+    // the commands, which must read "5:30" as the window would.
+    static void useDesktopLocale(const QString &languageFile = {});
 
 signals:
     void changed();

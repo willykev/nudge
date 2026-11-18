@@ -25,7 +25,8 @@ command needs a display, and the window updates at once if it is open.
   clock `5:30` is 17:30), 8 to 11 the morning, and 12 noon; `tonight at 9` is
   21:00. Write `5:30am` or `05:30` for an early time.
 - See: `nudge list today --json` (also `scheduled`, `all`, `flagged`,
-  `completed`, or `--list <name>`, `--tag <tag>`, `--search <text>`), and
+  `completed`, or `--list <name>`, `--tag <tag>`, `--search <text>`, which
+  also narrow a view: `nudge list today --list Work`), and
   `nudge show <id> --json` for one reminder with its subtasks.
 - Change: `nudge edit <id> --due "next friday" --priority high`; `--due none`,
   `--time none`, and `--repeat none` clear a value.
