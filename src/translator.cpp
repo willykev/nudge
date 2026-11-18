@@ -11,7 +11,7 @@
 
 Translator::Translator(const QString &languageFile, const QString &catalogDirectory, QObject *parent)
     : QTranslator(parent),
-      m_languageFile(languageFile.isEmpty() ? QDir::homePath() + "/.config/omarchy/language" : languageFile),
+      m_languageFile(languageFile.isEmpty() ? defaultLanguageFile() : languageFile),
       m_catalogDirectory(catalogDirectory) {
     m_debounce.setSingleShot(true);
     m_debounce.setInterval(80);
@@ -19,6 +19,14 @@ Translator::Translator(const QString &languageFile, const QString &catalogDirect
     connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_debounce.start(); });
     connect(&m_debounce, &QTimer::timeout, this, &Translator::reload);
     reload();
+}
+
+QString Translator::defaultLanguageFile() {
+    return QDir::homePath() + "/.config/omarchy/language";
+}
+
+void Translator::useDesktopLocale(const QString &languageFile) {
+    QLocale::setDefault(formatLocale(readLanguage(languageFile.isEmpty() ? defaultLanguageFile() : languageFile)));
 }
 
 // One registry code on the first line; anything else, or no file, is English.

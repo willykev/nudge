@@ -53,6 +53,11 @@ struct Reminder {
     qint64 completedAt = 0; // seconds since the epoch, like the two below
     qint64 createdAt = 0;
     qint64 modifiedAt = 0;
+    // When it was last given the moment it alerts at (its date, time, or
+    // early alert), which other edits leave alone: a moment that had already
+    // gone by then is not announced. 0 in a row written by Nudge 0.1.3 or
+    // earlier, which only had modifiedAt.
+    qint64 scheduledAt = 0;
     double position = 0;
     // Alert bookkeeping: the moments already announced, and a snooze.
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
@@ -60,6 +65,7 @@ struct Reminder {
     bool operator==(const Reminder &) const = default;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
     qint64 dueAt() const; // when the alert is due, 0 without a date
+    qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
 };
 
 // Every list, section, and reminder, held in memory and written through to
@@ -169,6 +175,17 @@ private:
     qint64 pragma(const char *name);
     qint64 dataVersion();
     void arm();
+    std::optional<Reminder> fetchReminder(qint64 id);
+    std::optional<TaskList> fetchList(qint64 id);
+    std::optional<Section> fetchSection(qint64 id);
+    // Before a row this process holds is written over, it is read again from
+    // the file, inside the transaction that will write it. Gone, it was
+    // deleted elsewhere and is not made again: the whole step fails. Changed
+    // elsewhere, `row` keeps what this process changed of `before` and takes
+    // the rest as it now is, and `before` becomes the row as found.
+    template <typename T> bool rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*fetch)(qint64));
+    bool hasColumn(const QString &table, const QString &column);
+    void keepPrivate();
     bool write(Reminder &reminder);
     bool write(TaskList &list);
     bool write(Section &section);

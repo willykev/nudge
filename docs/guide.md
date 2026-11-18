@@ -123,6 +123,7 @@ nudge add "Water the plants every friday"
 nudge add "Send the report" --list Work --due "next friday" --time 15:00 --priority high
 nudge list today
 nudge list --list Work --json
+nudge list today --list Work
 nudge done 12
 nudge edit 12 --due tomorrow
 nudge lists add Groceries
@@ -136,8 +137,13 @@ reminders for you.
 ## Where things are
 
 Reminders live in `~/.local/share/nudge/nudge.db`, a SQLite file written
-through on every change. `nudge export` writes everything as JSON, and `nudge
-import` reads it back. Setting `NUDGE_DB` points Nudge at another file.
+through on every change. The folder and the file, and the backups `nudge
+export` writes, are readable by you alone. `nudge export` writes everything as
+JSON, and `nudge import` reads it back, keeping apart lists and sections that
+have the same name. Setting `NUDGE_DB` points Nudge at another file.
+
+Commands read dates and times in the language picked for the desktop, as the
+window does, so `5:30` is the same time typed in either.
 
 ## What it does not do
 

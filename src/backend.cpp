@@ -1274,6 +1274,27 @@ int Backend::completedCount() const {
     return completedInView().size();
 }
 
+QVariantList Backend::completedIds() const {
+    QVariantList ids;
+    for (qint64 id : completedInView())
+        ids.append(id);
+    return ids;
+}
+
+void Backend::clearCompleted(const QVariantList &asked) {
+    QSet<qint64> wanted;
+    for (const QVariant &id : asked)
+        wanted.insert(id.toLongLong());
+    QVector<qint64> ids = completedInView();
+    ids.removeIf([&wanted](qint64 id) { return !wanted.contains(id); });
+    if (ids.isEmpty()) {
+        emit notice(tr("There are no completed reminders to delete"));
+        return;
+    }
+    m_store->removeReminders(ids);
+    emit notice(tr("Deleted %n completed reminders", "", ids.size()));
+}
+
 void Backend::clearCompleted() {
     const QVector<qint64> ids = completedInView();
     if (ids.isEmpty())

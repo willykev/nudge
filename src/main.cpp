@@ -54,6 +54,8 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "nudge: there is no command %s\n\n%s\n", qPrintable(first), qPrintable(cliSummary()));
             return 1;
         }
+        // "at 5:30" is the same time typed here as in the window.
+        Translator::useDesktopLocale();
         return runCli(app.arguments());
     }
 

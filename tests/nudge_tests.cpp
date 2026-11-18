@@ -1,5 +1,6 @@
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalServer>
@@ -17,6 +18,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <csignal>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "alerts.h"
@@ -2357,6 +2359,284 @@ private slots:
         QCOMPARE(ran.code, 0);
         QCOMPARE(QString::number(cliJson(ran).value("parent").toInteger()), parent);
         QCOMPARE(cliJson(ran).value("list").toString(), QString("Home"));
+    }
+
+    // ---- review fixes (0.1.3) ----
+
+    void aStaleWindowKeepsOthersChangesAndRestoresNothing() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        Store window(path), other(path);
+        const qint64 listId = addList(window, "Home");
+        const qint64 id = add(window, listId, "Call the bank");
+        QVERIFY(other.reloadIfChanged());
+
+        // Flagged elsewhere, and the window, not told yet, saves its notes:
+        // the flag stays.
+        Reminder flagged = *other.reminder(id);
+        flagged.flagged = true;
+        QVERIFY(other.put(flagged));
+        Reminder noted = *window.reminder(id);
+        noted.notes = "Ask about the fee";
+        QVERIFY(window.put(noted));
+        QVERIFY(window.reminder(id)->flagged);
+        QVERIFY(other.reloadIfChanged());
+        QVERIFY(other.reminder(id)->flagged);
+        QCOMPARE(other.reminder(id)->notes, QString("Ask about the fee"));
+
+        // Deleted elsewhere, and the window, not told yet, changes its
+        // priority: it is not made again, and the window says so.
+        other.removeReminder(id);
+        Reminder urgent = *window.reminder(id);
+        urgent.priority = 3;
+        QSignalSpy failed(&window, &Store::failed);
+        QCOMPARE(window.put(urgent), 0);
+        QCOMPARE(failed.count(), 1);
+        QVERIFY(!window.reminder(id));
+        QVERIFY(!Store(path).reminder(id));
+
+        // The same of a list.
+        const qint64 work = addList(window, "Work");
+        QVERIFY(other.reloadIfChanged());
+        other.removeList(work);
+        TaskList renamed = *window.list(work);
+        renamed.name = "Office";
+        QCOMPARE(window.put(renamed), 0);
+        QVERIFY(!window.list(work));
+        QVERIFY(!Store(path).list(work));
+    }
+
+    void editingNotesLeavesAnOverdueAlertDue() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        // Two reminders given a moment two hours ago, for an hour ago, which
+        // has not been announced yet: the alerts were off meanwhile.
+        const QDateTime hourAgo = QDateTime::currentDateTime().addSecs(-3600);
+        qint64 edited = 0, untouched = 0;
+        {
+            Store store(path);
+            const qint64 listId = addList(store, "Home");
+            const int minutes = hourAgo.time().hour() * 60 + hourAgo.time().minute();
+            edited = add(store, listId, "Pay the rent", hourAgo.date(), minutes);
+            untouched = add(store, listId, "Water the plants", hourAgo.date(), minutes);
+        }
+        const qint64 twoHoursAgo = QDateTime::currentSecsSinceEpoch() - 7200;
+        tamper(path, QString("UPDATE reminders SET modified_at = %1, scheduled_at = %1").arg(twoHoursAgo));
+
+        Store store(path);
+        FakeAlerts alerts;
+        Notifier notifier(&store, &alerts);
+        Reminder r = *store.reminder(edited);
+        r.notes = "By transfer";
+        QVERIFY(store.put(r));
+        notifier.check(QDateTime::currentDateTime());
+        QCOMPARE(alerts.sent.size(), 2);
+
+        // Given a moment that has already gone by, it is not news.
+        r = *store.reminder(edited);
+        r.dueMinutes = r.dueMinutes - 1;
+        QVERIFY(store.put(r));
+        notifier.check(QDateTime::currentDateTime());
+        QCOMPARE(alerts.sent.size(), 2);
+
+        // A file from 0.1.3, with no moment noted, goes by the last edit.
+        tamper(path, "UPDATE reminders SET scheduled_at = 0");
+        Store older(path);
+        QCOMPARE(older.reminder(untouched)->scheduledSince(), older.reminder(untouched)->modifiedAt);
+    }
+
+    void anOlderFileGainsTheMomentEachWasScheduled() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        {
+            Store store(path);
+            add(store, addList(store, "Home"), "Stretch");
+        }
+        // As Nudge 0.1.3 left it: no scheduled_at column.
+        tamper(path, "ALTER TABLE reminders DROP COLUMN scheduled_at");
+        tamper(path, "UPDATE reminders SET modified_at = 1234");
+        Store store(path);
+        QVERIFY(store.isOpen());
+        QCOMPARE(store.reminders().constBegin()->scheduledAt, qint64(1234));
+    }
+
+    void remindersAreReadableByTheirOwnerAlone() {
+        const mode_t umaskBefore = ::umask(022);
+        const auto restore = qScopeGuard([umaskBefore] { ::umask(umaskBefore); });
+        const auto others = QFile::ReadGroup | QFile::WriteGroup | QFile::ExeGroup | QFile::ReadOther |
+                            QFile::WriteOther | QFile::ExeOther;
+        QTemporaryDir dir;
+        const QString folder = dir.filePath("nudge"), path = folder + "/nudge.db";
+        {
+            Store store(path);
+            add(store, addList(store, "Home"), "See the doctor");
+            QCOMPARE(QFileInfo(folder).permissions() & others, QFile::Permissions());
+            for (const QString &file : {path, path + "-wal", path + "-shm"})
+                if (QFileInfo::exists(file))
+                    QVERIFY2(!(QFileInfo(file).permissions() & others), qPrintable(file));
+        }
+        // A file an earlier Nudge left readable by everyone is made private.
+        QVERIFY(QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup |
+                                                QFile::ReadOther));
+        {
+            Store store(path);
+            QCOMPARE(QFileInfo(path).permissions() & others, QFile::Permissions());
+        }
+        // And so is a backup, new or written over one that was not.
+        const QString backup = dir.filePath("backup.json");
+        QCOMPARE(cliRun(path, {"export", backup}).code, 0);
+        QCOMPARE(QFileInfo(backup).permissions() & others, QFile::Permissions());
+        QVERIFY(QFile::setPermissions(backup, QFile::ReadOwner | QFile::WriteOwner | QFile::ReadOther));
+        QCOMPARE(cliRun(path, {"export", backup}).code, 0);
+        QCOMPARE(QFileInfo(backup).permissions() & others, QFile::Permissions());
+    }
+
+    void aBackupKeepsListsAndSectionsApart() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        {
+            Store store(path);
+            const qint64 home = addList(store, "Home"), shouting = addList(store, "HOME");
+            qint64 later[2] = {};
+            for (int i = 0; i < 2; ++i) {
+                Section section;
+                section.listId = home;
+                section.name = "Later";
+                section.position = i + 1;
+                later[i] = store.put(section);
+            }
+            for (int i = 0; i < 2; ++i) {
+                Reminder r;
+                r.listId = home;
+                r.sectionId = later[i];
+                r.title = i ? "Second" : "First";
+                r.position = store.endPosition(home);
+                QVERIFY(store.put(r));
+            }
+            add(store, shouting, "Loud");
+        }
+        const QString file = dir.filePath("backup.json");
+        QCOMPARE(cliRun(path, {"export", file}).code, 0);
+
+        // Restored into an empty file, two lists and two sections stay two.
+        auto restoredFrom = [&dir](const QString &backup, const QString &name) {
+            const QString into = dir.filePath(name);
+            const CliRun ran = cliRun(into, {"import", backup});
+            if (ran.code != 0)
+                qWarning() << ran.err;
+            return into;
+        };
+        {
+            Store restored(restoredFrom(file, "restored.db"));
+            QStringList names;
+            for (const TaskList &list : restored.lists())
+                names << list.name;
+            QCOMPARE(names, (QStringList{"Home", "HOME"}));
+            QCOMPARE(restored.sections().size(), 2);
+            QHash<QString, const Reminder *> byTitle;
+            for (const Reminder &r : restored.reminders())
+                byTitle.insert(r.title, &r);
+            QCOMPARE(byTitle.size(), 3);
+            QVERIFY(byTitle["First"]->sectionId && byTitle["Second"]->sectionId);
+            QVERIFY(byTitle["First"]->sectionId != byTitle["Second"]->sectionId);
+            QCOMPARE(byTitle["First"]->listId, byTitle["Second"]->listId);
+            QVERIFY(byTitle["Loud"]->listId != byTitle["First"]->listId);
+        }
+
+        // An export from before ids keeps lists apart that differ in case.
+        QFile original(file);
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QJsonObject document = QJsonDocument::fromJson(original.readAll()).object();
+        QJsonArray lists, reminders;
+        for (const QJsonValue &value : document.value("lists").toArray()) {
+            QJsonObject entry = value.toObject();
+            entry.remove("id");
+            entry.remove("sectionIds");
+            lists << entry;
+        }
+        for (const QJsonValue &value : document.value("reminders").toArray()) {
+            QJsonObject entry = value.toObject();
+            entry.remove("listId");
+            entry.remove("sectionId");
+            reminders << entry;
+        }
+        document["lists"] = lists;
+        document["reminders"] = reminders;
+        const QString older = dir.filePath("older.json");
+        write(older, QJsonDocument(document).toJson());
+        Store restored(restoredFrom(older, "older.db"));
+        QCOMPARE(restored.lists().size(), 2);
+
+        // Imported over lists that are here already, it uses each only once.
+        const QString existing = dir.filePath("existing.db");
+        {
+            Store store(existing);
+            addList(store, "home");
+        }
+        restoredFrom(file, "existing.db");
+        Store again(existing);
+        QCOMPARE(again.lists().size(), 2);
+    }
+
+    void deleteCompletedDeletesWhatItAskedAbout() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("nudge.db"));
+        Backend backend(&store);
+        const qint64 listId = addList(store, "Home");
+        const qint64 asked = add(store, listId, "Asked about");
+        store.complete(asked, friday);
+        backend.setViewKey("list:" + QString::number(listId));
+        const QVariantList ids = backend.completedIds();
+        QCOMPARE(ids, (QVariantList{asked}));
+        // Completed while the question is up, here or by a command.
+        const qint64 meanwhile = add(store, listId, "Done meanwhile");
+        store.complete(meanwhile, friday);
+        QCOMPARE(backend.completedCount(), 2);
+        backend.clearCompleted(ids);
+        QVERIFY(!store.reminder(asked));
+        QVERIFY(store.reminder(meanwhile));
+    }
+
+    void commandsReadTimesAsTheWindowDoes() {
+        QTemporaryDir dir;
+        const QLocale before;
+        const auto restore = qScopeGuard([before] { QLocale::setDefault(before); });
+        const QString language = dir.filePath("language");
+        for (const QByteArray &code : {QByteArray("en"), QByteArray("de")}) {
+            write(language, code + "\n");
+            int inWindow = -1;
+            {
+                Translator translator(language, ":/i18n");
+                inWindow = Dates::parseTime("5:30");
+            }
+            // Whatever the system's own locale is.
+            QLocale::setDefault(QLocale(code == "en" ? "de" : "en"));
+            Translator::useDesktopLocale(language);
+            QCOMPARE(Dates::parseTime("5:30"), inWindow);
+        }
+    }
+
+    void listingAViewOfOneListShowsThatViewOfIt() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("nudge.db");
+        {
+            Store store(path);
+            const qint64 home = addList(store, "Home"), work = addList(store, "Work");
+            const QDate today = QDate::currentDate();
+            add(store, home, "Home today", today);
+            add(store, home, "Home tomorrow", today.addDays(1));
+            add(store, work, "Work today", today);
+        }
+        auto listed = [&path](const QStringList &arguments) {
+            QStringList found;
+            for (const QJsonValue &r : cliJson(cliRun(path, arguments)).value("reminders").toArray())
+                found << r.toObject().value("title").toString();
+            found.sort();
+            return found;
+        };
+        QCOMPARE(listed({"list", "today", "--list", "Home", "--json"}), QStringList{"Home today"});
+        QCOMPARE(listed({"list", "--list", "Home", "--json"}), (QStringList{"Home today", "Home tomorrow"}));
+        QCOMPARE(listed({"list", "today", "--json"}), (QStringList{"Home today", "Work today"}));
     }
 
     void exportAndSkillTakeJson() {

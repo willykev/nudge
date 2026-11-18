@@ -125,7 +125,9 @@ QJsonObject toJson(const Store &store, const Reminder &r) {
             {"notes", r.notes},
             {"url", r.url},
             {"list", list ? list->name : QString()},
+            {"listId", r.listId},
             {"section", section ? QJsonValue(section->name) : QJsonValue()},
+            {"sectionId", section ? QJsonValue(section->id) : QJsonValue()},
             {"parent", r.parentId ? QJsonValue(r.parentId) : QJsonValue()},
             {"due", r.due.isValid() ? QJsonValue(r.due.toString(Qt::ISODate)) : QJsonValue()},
             {"time", r.dueMinutes >= 0 ? QJsonValue(isoTime(r.dueMinutes)) : QJsonValue()},
@@ -527,28 +529,47 @@ int list(const QStringList &arguments) {
     Store store;
     if (!ready(store))
         return 1;
+    const bool named = !command.arguments().isEmpty();
     const QString name = command.arguments().value(0, "all");
     View view = View::fromKey(name);
     if (view.key() != name)
         return fail("Views are: today, scheduled, all, flagged, completed.");
+    // --list, --tag and --search each narrow what is listed. Without a view
+    // named, the first of them is the view, as the window shows it (a list
+    // with its sections); with one, "list today --list Home" is what is due
+    // today in Home.
+    QVector<View> filters;
     if (command.parser.isSet("list")) {
         const TaskList *found = listNamed(store, command.parser.value("list"));
         if (!found)
             return fail(QString("No list named %1. %2").arg(command.parser.value("list"), listNames(store)));
-        view = View{View::List, found->id, {}};
-    } else if (command.parser.isSet("tag")) {
-        view = View{View::Tag, 0, QString(command.parser.value("tag")).remove('#')};
-    } else if (command.parser.isSet("search")) {
-        view = View{View::Search, 0, command.parser.value("search").simplified()};
+        filters << View{View::List, found->id, {}};
     }
+    if (command.parser.isSet("tag"))
+        filters << View{View::Tag, 0, QString(command.parser.value("tag")).remove('#')};
+    if (command.parser.isSet("search"))
+        filters << View{View::Search, 0, command.parser.value("search").simplified()};
+    if (!named && !filters.isEmpty())
+        view = filters.takeFirst();
 
     ViewOptions options;
     options.now = QDateTime::currentDateTime();
+    // What each filter holds, done or not: the view says whether done ones show.
+    std::optional<QSet<qint64>> allowed;
+    for (const View &filter : std::as_const(filters)) {
+        ViewOptions everything = options;
+        everything.showCompleted = true;
+        QSet<qint64> held;
+        for (const Row &row : buildRows(store, filter, everything))
+            if (!row.heading)
+                held.insert(row.id);
+        allowed = allowed ? *allowed & held : held;
+    }
     QJsonArray found;
     for (const Row &row : buildRows(store, view, options)) {
         const Reminder *r = row.heading ? nullptr : store.reminder(row.id);
         // One without a title is being typed in the window right now.
-        if (!r || r->title.isEmpty())
+        if (!r || r->title.isEmpty() || (allowed && !allowed->contains(r->id)))
             continue;
         if (command.wantsJson())
             found << toJson(store, *r);
@@ -652,11 +673,16 @@ int exportAll(const QStringList &arguments) {
         return 1;
     QJsonArray lists, reminders;
     for (const TaskList &entry : store.lists()) {
-        QJsonArray sections;
+        // Names, as every export has had them, and beside them the ids, which
+        // tell apart two lists or two sections that are called the same.
+        QJsonArray sections, sectionIds;
         for (const Section &section : store.sections())
-            if (section.listId == entry.id)
+            if (section.listId == entry.id) {
                 sections << section.name;
-        lists << QJsonObject{{"name", entry.name}, {"color", entry.color}, {"sort", entry.sort}, {"sections", sections}};
+                sectionIds << section.id;
+            }
+        lists << QJsonObject{{"id", entry.id},       {"name", entry.name},     {"color", entry.color},
+                             {"sort", entry.sort},   {"sections", sections},   {"sectionIds", sectionIds}};
     }
     QVector<const Reminder *> ordered;
     for (const Reminder &r : store.reminders())
@@ -680,8 +706,11 @@ int exportAll(const QStringList &arguments) {
     }
     // Written beside the target and renamed over it, so a failure halfway
     // leaves any earlier export whole.
+    // Readable by its owner alone, as the reminders it holds are, whatever
+    // file it replaces.
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(QJsonDocument(document).toJson()) < 0 || !file.commit())
+    if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
+        file.write(QJsonDocument(document).toJson()) < 0 || !file.commit())
         return fail("Could not write " + path + ": " + file.errorString());
     if (command.wantsJson())
         print({{"exported", int(reminders.size())}, {"file", QFileInfo(path).absoluteFilePath()}});
@@ -710,37 +739,86 @@ int importAll(const QStringList &arguments) {
     Failures failures(store);
     // One step for everything, committed before the count is told.
     std::optional<Store::Tx> tx(std::in_place, &store);
-    auto sectionIn = [&](qint64 listId, const QString &name) -> qint64 {
-        if (name.isEmpty())
-            return 0;
-        for (const Section &section : store.sections())
-            if (section.listId == listId && section.name == name)
-                return section.id;
-        Section section;
-        section.listId = listId;
-        section.name = name;
-        section.position = store.sections().isEmpty() ? 1 : store.sections().last().position + 1;
-        return store.put(section);
-    };
+    // What was here before the import. An export from Nudge 0.1.4 or later
+    // gives each list and section an id, and two it holds apart stay apart
+    // here, whatever they are called: each is matched to one that was here
+    // already only by its name, and only once. Lists and sections the import
+    // makes are only ever matched by their exact name, in an export without
+    // ids, where the name is all there is.
+    QSet<qint64> listsBefore, sectionsBefore;
+    for (const TaskList &list : store.lists())
+        listsBefore.insert(list.id);
+    for (const Section &section : store.sections())
+        sectionsBefore.insert(section.id);
+    QHash<qint64, qint64> listIds, sectionIds;
+    QSet<qint64> claimed, claimedSections;
     // The lists the import makes, the only ones it may give the file's color
     // and order: nothing already here is changed.
     QSet<qint64> made;
-    auto listFor = [&](const QString &name) -> qint64 {
-        if (name.isEmpty())
+    auto listFor = [&](qint64 oldId, const QString &name) -> qint64 {
+        if (oldId && listIds.contains(oldId))
+            return listIds.value(oldId);
+        if (name.isEmpty() && !oldId)
             return store.defaultListId();
-        if (const TaskList *found = listNamed(store, name))
-            return found->id;
-        TaskList created;
-        created.name = name;
-        created.color = "blue";
-        created.position = store.lists().isEmpty() ? 1 : store.lists().last().position + 1;
-        const qint64 id = store.put(created);
-        made.insert(id);
+        qint64 id = 0;
+        for (const Qt::CaseSensitivity sensitivity : {Qt::CaseSensitive, Qt::CaseInsensitive}) {
+            for (const TaskList &list : store.lists()) {
+                const bool before = listsBefore.contains(list.id);
+                if (oldId ? !before || claimed.contains(list.id)
+                          : !before && sensitivity == Qt::CaseInsensitive)
+                    continue;
+                if (list.name.compare(name, sensitivity) == 0) {
+                    id = list.id;
+                    break;
+                }
+            }
+            if (id)
+                break;
+        }
+        if (!id) {
+            TaskList created;
+            created.name = name;
+            created.color = "blue";
+            created.position = store.lists().isEmpty() ? 1 : store.lists().last().position + 1;
+            id = store.put(created);
+            made.insert(id);
+        }
+        if (oldId) {
+            listIds.insert(oldId, id);
+            claimed.insert(id);
+        }
+        return id;
+    };
+    auto sectionIn = [&](qint64 listId, qint64 oldId, const QString &name) -> qint64 {
+        if (oldId && sectionIds.contains(oldId))
+            return sectionIds.value(oldId);
+        if (name.isEmpty())
+            return 0;
+        qint64 id = 0;
+        for (const Section &section : store.sections()) {
+            if (section.listId != listId || section.name != name)
+                continue;
+            if (oldId && (!sectionsBefore.contains(section.id) || claimedSections.contains(section.id)))
+                continue;
+            id = section.id;
+            break;
+        }
+        if (!id) {
+            Section section;
+            section.listId = listId;
+            section.name = name;
+            section.position = store.sections().isEmpty() ? 1 : store.sections().last().position + 1;
+            id = store.put(section);
+        }
+        if (oldId) {
+            sectionIds.insert(oldId, id);
+            claimedSections.insert(id);
+        }
         return id;
     };
     for (const QJsonValue &value : document.value("lists").toArray()) {
         const QJsonObject entry = value.toObject();
-        const qint64 listId = listFor(entry.value("name").toString());
+        const qint64 listId = listFor(entry.value("id").toInteger(), entry.value("name").toString());
         if (const TaskList *list = store.list(listId); list && made.contains(listId)) {
             TaskList updated = *list;
             if (!entry.value("color").toString().isEmpty())
@@ -749,8 +827,9 @@ int importAll(const QStringList &arguments) {
                 updated.sort = entry.value("sort").toString();
             store.put(updated);
         }
-        for (const QJsonValue &section : entry.value("sections").toArray())
-            sectionIn(listId, section.toString());
+        const QJsonArray sections = entry.value("sections").toArray(), ids = entry.value("sectionIds").toArray();
+        for (qsizetype i = 0; i < sections.size(); ++i)
+            sectionIn(listId, ids.at(i).toInteger(), sections.at(i).toString());
     }
 
     // Parents first, so subtasks can find the ids their parents were given.
@@ -763,8 +842,8 @@ int importAll(const QStringList &arguments) {
             if ((oldParent != 0) != subtasks)
                 continue;
             Reminder r;
-            r.listId = listFor(entry.value("list").toString());
-            r.sectionId = sectionIn(r.listId, entry.value("section").toString());
+            r.listId = listFor(entry.value("listId").toInteger(), entry.value("list").toString());
+            r.sectionId = sectionIn(r.listId, entry.value("sectionId").toInteger(), entry.value("section").toString());
             r.parentId = newIds.value(oldParent);
             r.title = entry.value("title").toString();
             r.notes = entry.value("notes").toString();

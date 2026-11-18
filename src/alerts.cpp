@@ -202,8 +202,9 @@ void Notifier::check(const QDateTime &now) {
         later(r.snoozeUntil);
         // A moment that had already passed when the reminder was last given
         // its date is not news: setting something for this morning in the
-        // afternoon should not alert at once.
-        const qint64 since = r.modifiedAt - 60;
+        // afternoon should not alert at once. Other edits, like its notes,
+        // leave that alone.
+        const qint64 since = r.scheduledSince() - 60;
         Pending p{r.id, false, false, false};
         p.early = earlyAt && earlyAt <= seconds && dueAt > seconds && r.alertedEarly != earlyAt && earlyAt >= since;
         p.due = dueAt <= seconds && r.alertedDue != dueAt && dueAt >= since;
