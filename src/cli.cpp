@@ -38,8 +38,7 @@ namespace {
 const QStringList priorities{"none", "low", "medium", "high"};
 
 QString reminderTitle(const Reminder &r) {
-    return r.title.isEmpty() && !r.draft && r.hasContent()
-               ? QCoreApplication::translate("Store", "Untitled reminder") : r.title;
+    return r.title.trimmed().isEmpty() ? QCoreApplication::translate("Store", "Untitled reminder") : r.title;
 }
 
 // What is stored can come from an import or another program, so anything in
@@ -758,12 +757,8 @@ int exportAll(const QStringList &arguments) {
                : a->position != b->position ? a->position < b->position
                                             : a->id < b->id;
     });
-    for (const Reminder *r : ordered) {
-        QJsonObject entry = toJson(store, *r);
-        if (r->title.trimmed().isEmpty())
-            entry["title"] = QCoreApplication::translate("Store", "Untitled reminder");
-        reminders << entry;
-    }
+    for (const Reminder *r : ordered)
+        reminders << toJson(store, *r);
     const QJsonObject document{{"nudge", 1},
                                {"exportedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
                                {"lists", lists},
@@ -789,6 +784,35 @@ int exportAll(const QStringList &arguments) {
     return 0;
 }
 
+Reminder reminderFromBackup(const QJsonObject &entry, const QDate &today) {
+    Reminder r;
+    r.title = entry.value("title").toString();
+    r.notes = entry.value("notes").toString();
+    r.url = entry.value("url").toString();
+    r.due = QDate::fromString(entry.value("due").toString(), Qt::ISODate);
+    const bool hadDate = r.due.isValid();
+    r.repeat = Repeat::parse(entry.value("repeat").toString()).toString();
+    // Older backups could carry a repeat with no date. Start it as if its
+    // rule were set today.
+    if (!hadDate && !r.repeat.isEmpty())
+        r.due = today;
+    const QTime time = QTime::fromString(entry.value("time").toString(), "HH:mm");
+    r.dueMinutes = r.due.isValid() && time.isValid() ? time.hour() * 60 + time.minute() : -1;
+    r.lateFold = hadDate && r.dueMinutes >= 0 && entry.value("lateFold").toBool();
+    r.repeatEnd = QDate::fromString(entry.value("repeatEnd").toString(), Qt::ISODate);
+    r.early = entry.value("early").toInt();
+    r.priority = qMax(0, int(priorities.indexOf(entry.value("priority").toString())));
+    r.flagged = entry.value("flagged").toBool();
+    for (const QJsonValue &tag : entry.value("tags").toArray())
+        if (const QString text = tag.toString(); !text.trimmed().isEmpty())
+            r.tags << text;
+    r.completed = entry.value("completed").toBool();
+    r.completedAt = readMoment(entry, "completedAt");
+    r.createdAt = readMoment(entry, "createdAt");
+    r.snoozeUntil = r.completed || !hadDate ? 0 : readMoment(entry, "snoozeUntil");
+    return r;
+}
+
 int importAll(const QStringList &arguments) {
     Command command("import", "Add the lists and reminders of an export. Nothing already here is changed.");
     command.parser.addPositionalArgument("file", "An export made by nudge export", "<file>");
@@ -804,13 +828,20 @@ int importAll(const QStringList &arguments) {
         (document.contains("lists") && !document.value("lists").isArray()))
         return fail(path + " is not a Nudge export.");
 
-    const QJsonArray imported = document.value("reminders").toArray();
+    const QJsonArray entries = document.value("reminders").toArray();
+    struct Imported {
+        QJsonObject entry;
+        Reminder reminder;
+        qint64 oldId, oldParent;
+    };
+    QVector<Imported> imported;
+    imported.reserve(entries.size());
+    const QDate today = QDate::currentDate();
     QHash<qint64, qint64> parentOf;
-    QSet<QString> incomingNames;
-    for (const QJsonValue &value : imported) {
+    for (const QJsonValue &value : entries) {
+        if (!value.isObject())
+            return fail("A reminder in the backup is invalid.");
         const QJsonObject entry = value.toObject();
-        if (entry.value("title").toString().trimmed().isEmpty())
-            return fail("Every imported reminder needs a title.");
         const QJsonValue idValue = entry.value("id"), parentValue = entry.value("parent");
         const qint64 id = idValue.toInteger(-1);
         const qint64 parent = parentValue.isUndefined() || parentValue.isNull() ? 0 : parentValue.toInteger(-1);
@@ -819,13 +850,21 @@ int importAll(const QStringList &arguments) {
             return fail("The backup has invalid or duplicate reminder ids.");
         if (id > 0)
             parentOf.insert(id, parent);
-        incomingNames.insert(entry.value("list").toString());
+        imported.append({entry, reminderFromBackup(entry, today), qMax<qint64>(id, 0), parent});
     }
-    for (const QJsonValue &value : imported) {
-        const qint64 parent = value.toObject().value("parent").toInteger();
-        if (parent && parentOf.value(parent, -1) != 0)
+    QSet<qint64> neededParents;
+    for (const Imported &row : std::as_const(imported)) {
+        if (row.oldParent && parentOf.value(row.oldParent, -1) != 0)
             return fail("A subtask in the backup does not name a top-level reminder.");
+        if (row.oldParent && row.reminder.hasContent())
+            neededParents.insert(row.oldParent);
     }
+    const int skipped = int(imported.removeIf([&](const Imported &row) {
+        return !row.reminder.hasContent() && !neededParents.contains(row.oldId);
+    }));
+    QSet<QString> incomingNames;
+    for (const Imported &row : std::as_const(imported))
+        incomingNames.insert(row.entry.value("list").toString());
     for (const QJsonValue &value : document.value("lists").toArray()) {
         const QJsonObject entry = value.toObject();
         if (entry.value("name").toString().trimmed().isEmpty() ||
@@ -949,12 +988,11 @@ int importAll(const QStringList &arguments) {
         positions[r.listId] = qMax(positions.value(r.listId), r.position);
     int added = 0;
     for (const bool subtasks : {false, true}) {
-        for (const QJsonValue &value : imported) {
-            const QJsonObject entry = value.toObject();
-            const qint64 oldParent = entry.value("parent").toInteger();
+        for (const auto &[entry, reminder, oldId, oldParent] : std::as_const(imported)) {
             if ((oldParent != 0) != subtasks)
                 continue;
-            Reminder r;
+            Reminder r = reminder;
+            r.title = reminderTitle(r);
             if (oldParent) {
                 r.parentId = newIds.value(oldParent);
                 const Reminder *parent = store.reminder(r.parentId);
@@ -966,31 +1004,12 @@ int importAll(const QStringList &arguments) {
                 r.listId = listFor(entry.value("listId").toInteger(), entry.value("list").toString());
                 r.sectionId = sectionIn(r.listId, entry.value("sectionId").toInteger(), entry.value("section").toString());
             }
-            r.title = entry.value("title").toString();
-            r.notes = entry.value("notes").toString();
-            r.url = entry.value("url").toString();
-            r.due = QDate::fromString(entry.value("due").toString(), Qt::ISODate);
-            const QTime time = QTime::fromString(entry.value("time").toString(), "HH:mm");
-            r.dueMinutes = r.due.isValid() && time.isValid() ? time.hour() * 60 + time.minute() : -1;
-            r.lateFold = r.dueMinutes >= 0 && entry.value("lateFold").toBool();
-            r.repeat = Repeat::parse(entry.value("repeat").toString()).toString();
-            r.repeatEnd = QDate::fromString(entry.value("repeatEnd").toString(), Qt::ISODate);
-            r.early = entry.value("early").toInt();
-            r.priority = qMax(0, int(priorities.indexOf(entry.value("priority").toString())));
-            r.flagged = entry.value("flagged").toBool();
-            for (const QJsonValue &tag : entry.value("tags").toArray())
-                r.tags << tag.toString();
-            r.completed = entry.value("completed").toBool();
-            r.completedAt = readMoment(entry, "completedAt");
-            r.createdAt = readMoment(entry, "createdAt");
-            r.snoozeUntil = r.completed || !r.due.isValid() ? 0 : readMoment(entry, "snoozeUntil");
             r.position = ++positions[r.listId];
             // A done reminder has no open subtasks, so an open one reopens
             // the parent it came with.
             if (const Reminder *parent = store.reminder(r.parentId); !r.completed && parent && parent->completed)
                 store.reopen(r.parentId);
             const qint64 id = store.put(r);
-            const qint64 oldId = entry.value("id").toInteger();
             if (oldId)
                 newIds.insert(oldId, id);
             added += id != 0;
@@ -998,10 +1017,16 @@ int importAll(const QStringList &arguments) {
     }
     if (!tx.commit() || failures.any())
         return failures.report("Nothing was imported");
-    if (command.wantsJson())
-        print({{"imported", added}});
-    else
+    if (command.wantsJson()) {
+        QJsonObject result{{"imported", added}};
+        if (skipped)
+            result["skipped"] = skipped;
+        print(result);
+    } else {
         print(stdout, QString("Imported %1 reminders").arg(added));
+        if (skipped)
+            print(stdout, QString("Skipped %1 empty %2").arg(skipped).arg(skipped == 1 ? "reminder" : "reminders"));
+    }
     return 0;
 }
 
@@ -1210,7 +1235,7 @@ int runDaemon(const QProcessEnvironment &session) {
     });
     // Clicking an alert brings up the window: the one already open, or a new one.
     QObject::connect(&notifier, &Notifier::opened, &notifier, [&store, session](qint64 id) {
-        if (revealNudgeWindow(store.path(), id) || (!id && focusNudgeWindow()))
+        if (openExistingNudgeWindow(store.path(), id))
             return;
         const WindowLaunch launch = windowLaunch(QCoreApplication::applicationFilePath(), session,
                                                  QStandardPaths::findExecutable("systemd-run"), id);

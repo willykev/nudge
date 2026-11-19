@@ -252,6 +252,12 @@ ApplicationWindow {
             detailsVisible = false
     }
 
+    function showRevealedReminder() {
+        listView.forceLayout()
+        if (backend.selectedRow >= 0)
+            listView.positionViewAtIndex(backend.selectedRow, ListView.Contain)
+    }
+
     Component.onCompleted: listView.forceActiveFocus()
     // Closing the window mid-word keeps the word, and settles a new reminder
     // the details were filling in.
@@ -268,6 +274,7 @@ ApplicationWindow {
             win.raise()
             win.requestActivate()
         }
+        function onRevealSelection() { Qt.callLater(win.showRevealedReminder) }
         function onSelectedRowChanged() {
             if (backend.selectedRow >= 0)
                 listView.positionViewAtIndex(backend.selectedRow, ListView.Contain)

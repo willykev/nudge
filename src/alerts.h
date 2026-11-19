@@ -31,7 +31,7 @@ public:
 // Brings an open Nudge window to the front, and says whether it did.
 bool focusNudgeWindow(qint64 pid = 0);
 void registerNudgeWindow(QObject *window);
-bool revealNudgeWindow(const QString &database, qint64 id);
+bool openExistingNudgeWindow(const QString &database, qint64 id);
 
 // Desktop notifications over D-Bus (org.freedesktop.Notifications).
 class DesktopAlerts : public QObject, public Alerts {

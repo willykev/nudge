@@ -65,6 +65,7 @@ struct Reminder {
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
 
     bool operator==(const Reminder &) const = default;
+    bool hasText() const; // title, notes, or link entered for a draft
     bool hasContent() const;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
     qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
@@ -125,7 +126,9 @@ public:
     bool commit();
     // Each returns the id, or 0 when it could not be saved. An open reminder
     // reopens a completed parent, in the same step.
-    qint64 put(Reminder reminder);
+    // An edit that moves a reminder uses the normal clock time unless a
+    // relative entry explicitly chose the later fold for the new time.
+    qint64 put(Reminder reminder, bool keepFold = false);
     qint64 put(TaskList list);
     qint64 put(Section section);
     void removeReminder(qint64 id); // and its subtasks

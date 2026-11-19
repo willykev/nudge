@@ -167,11 +167,37 @@ private slots:
         QCOMPARE(Dates::parseDate("1/2/64", friday.date()), QDate(2064, 1, 2));
         QCOMPARE(Dates::parseQuick("Index May 4 1999", friday).due, QDate(1999, 5, 4));
         QCOMPARE(Dates::parseQuick("Pay on May 4 2101", friday).due, QDate(2101, 5, 4));
-        QCOMPARE(Dates::parseQuick("Appointment 12/10", friday).due, QDate(2026, 12, 10));
+        QCOMPARE(Dates::parseQuick("Appointment on 12/10", friday).due, QDate(2026, 12, 10));
         QLocale::setDefault(QLocale("en_GB"));
-        QCOMPARE(Dates::parseQuick("Appointment 12/10", friday).due, QDate(2027, 10, 12));
+        QCOMPARE(Dates::parseQuick("Appointment on 12/10", friday).due, QDate(2027, 10, 12));
         QLocale::setDefault(QLocale("de_DE"));
-        QCOMPARE(Dates::parseQuick("Appointment 24.12.", friday).due, QDate(2026, 12, 24));
+        QCOMPARE(Dates::parseQuick("Appointment on 24.12.", friday).due, QDate(2026, 12, 24));
+        QCOMPARE(Dates::parseDate("24.12.", friday.date()), QDate(2026, 12, 24));
+    }
+
+    void quickEntryNeedsACueForShortNumericDates() {
+        const auto fraction = Dates::parseQuick("Measure 3/4", friday);
+        QCOMPARE(fraction.title, QString("Measure 3/4"));
+        QVERIFY(!fraction.due.isValid());
+        QCOMPARE(Dates::parseQuick("Measure on 3/4", friday).due, QDate(2027, 3, 4));
+        QCOMPARE(Dates::parseQuick("Measure 2027-03-04", friday).due, QDate(2027, 3, 4));
+
+        QLocale::setDefault(QLocale("de_DE"));
+        const auto version = Dates::parseQuick("Upgrade to Python 3.12.", friday);
+        QCOMPARE(version.title, QString("Upgrade to Python 3.12."));
+        QVERIFY(!version.due.isValid());
+        QCOMPARE(Dates::parseQuick("Upgrade Python by 3.12", friday).due, QDate(2026, 12, 3));
+    }
+
+    void quickEntryKeepsAmountsAfterNamedDates() {
+        const auto pay = Dates::parseQuick("Pay contractor Dec 1 1200", friday);
+        QCOMPARE(pay.title, QString("Pay contractor 1200"));
+        QCOMPARE(pay.due, QDate(2026, 12, 1));
+        const auto run = Dates::parseQuick("Run Nov 3 5000", friday);
+        QCOMPARE(run.title, QString("Run 5000"));
+        QCOMPARE(run.due, QDate(2027, 11, 3));
+        QCOMPARE(Dates::parseQuick("Index Dec 1, 1200", friday).due, QDate(1200, 12, 1));
+        QCOMPARE(Dates::parseDate("Dec 1 1200", friday.date()), QDate(1200, 12, 1));
     }
 
     void quickEntryKeepsTagSymbolsAndPreviewsEachTagOnce() {
@@ -225,6 +251,29 @@ private slots:
         const Store disk(store.path());
         QVERIFY(disk.reminder(id)->lateFold);
         QCOMPARE(disk.reminder(id)->dueAt(zone), now.addSecs(1800).toSecsSinceEpoch());
+    }
+
+    void movingTheMomentClearsThePreviousFold() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("reminders.db"));
+        Backend backend(&store);
+        quiet(backend, dir);
+        Reminder entry;
+        entry.listId = addList(store, "Home");
+        entry.title = "After the clocks change";
+        entry.due = QDate(2026, 11, 1); // Sunday
+        entry.dueMinutes = 90;
+        entry.lateFold = true;
+        const auto id = store.put(entry);
+        QVERIFY(id);
+        backend.setNotes(id, "An edit that keeps the same moment");
+        QVERIFY(store.reminder(id)->lateFold);
+
+        // The store itself moves a Sunday to Monday for a weekday rule.
+        backend.setRepeat(id, "weekdays", 1);
+        const Store disk(store.path());
+        QCOMPARE(disk.reminder(id)->due, QDate(2026, 11, 2));
+        QVERIFY(!disk.reminder(id)->lateFold);
     }
 
     void overdueUsesTheSameInstantAsTheDueAlert() {
@@ -1764,6 +1813,40 @@ private slots:
         QVERIFY(!store.canUndo());
     }
 
+    void oldDraftsKeepWrittenDetailsAndLoseViewDefaults() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store original(path);
+        QVector<qint64> empty;
+        qint64 withNotes = 0;
+        {
+            Backend window(&original);
+            quiet(window, dir);
+            for (const auto *view : {"today", "scheduled", "flagged", "tag:work"}) {
+                window.setViewKey(view);
+                const qint64 id = window.addReminder();
+                QVERIFY(id && original.reminder(id)->draft && original.reminder(id)->hasContent());
+                empty << id;
+            }
+            window.setViewKey("today");
+            withNotes = window.addReminder();
+            window.setNotes(withNotes, "What was already written");
+            QVERIFY(original.reminder(withNotes)->draft);
+        }
+        for (const qint64 id : empty)
+            age(original, id, 3600);
+        age(original, withNotes, 3600);
+
+        Store restored(path);
+        Backend restarted(&restored);
+        quiet(restarted, dir);
+        restarted.setViewKey("all");
+        QCOMPARE(restored.reminders().size(), 1);
+        QCOMPARE(restored.reminder(withNotes)->notes, QString("What was already written"));
+        QVERIFY(!restored.reminder(withNotes)->draft);
+        QVERIFY(restarted.reminders()->rowOf(withNotes) >= 0);
+    }
+
     // ---- backend (review fixes) ----
 
 private:
@@ -1890,6 +1973,62 @@ private slots:
         QVERIFY(!store.canUndo());
         QVERIFY(!store.canRedo());
         QCOMPARE(backend.selectedId(), last); // where the click put it
+    }
+
+    void cancellingADraftKeepsAConcurrentWriteAndClearsTheDraft() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("reminders.db"));
+        Backend window(&store);
+        quiet(window, dir);
+        const qint64 list = addList(store, "Home");
+        const qint64 saved = add(store, list, "Already saved");
+        window.setViewKey("scheduled");
+        const qint64 draft = window.addReminder();
+        QVERIFY(draft && store.reminder(draft)->due.isValid());
+
+        // This makes discardLast reload and decline to undo the old step.
+        Store command(store.path());
+        const qint64 outside = add(command, list, "New from another writer");
+        window.commitTitle(draft, "");
+        QVERIFY(!store.reminder(draft));
+        QVERIFY(Store(store.path()).reminder(outside));
+
+        // There is no separate deletion step that could bring the draft back.
+        store.undo();
+        QVERIFY(!store.reminder(draft));
+        QVERIFY(!store.reminder(saved));
+        QVERIFY(store.reminder(outside));
+    }
+
+    void aCommitThatRefusesANewReminderKeepsThePreviousSelection() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        Backend window(&store);
+        quiet(window, dir);
+        const qint64 list = addList(store, "Home");
+        const qint64 saved = add(store, list, "Already saved");
+        window.setViewKey("list:" + QString::number(list));
+        QCOMPARE(window.selectedId(), saved);
+
+        // The insert succeeds, but its deferred foreign key fails at COMMIT.
+        tamper(path, "CREATE TABLE allowed (id INTEGER PRIMARY KEY)");
+        tamper(path, "CREATE TABLE written (id INTEGER REFERENCES allowed(id) DEFERRABLE INITIALLY DEFERRED)");
+        tamper(path, "CREATE TRIGGER record_draft AFTER INSERT ON reminders WHEN NEW.draft = 1 "
+                     "BEGIN INSERT INTO written VALUES (NEW.id); END");
+        for (const QString &name : QSqlDatabase::connectionNames()) {
+            const QSqlDatabase db = QSqlDatabase::database(name, false);
+            if (db.databaseName() == path)
+                QVERIFY(QSqlQuery(db).exec("PRAGMA foreign_keys = ON"));
+        }
+        qint64 refused = 0;
+        connect(&store, &Store::failed, &window, [&] { refused = window.draftId(); });
+        QCOMPARE(window.addReminder(), 0);
+        QVERIFY(refused > 0);
+        QCOMPARE(window.draftId(), 0);
+        QCOMPARE(window.selectedId(), saved);
+        QVERIFY(!store.reminder(refused));
+        QCOMPARE(Store(path).reminders().size(), 1);
     }
 
     void changesToADraftUndoWithIt() {
@@ -3245,7 +3384,7 @@ private slots:
             QJsonArray{QJsonObject{{"id", 7}, {"title", "Repeated"}},
                        QJsonObject{{"id", 7}, {"title", "Another"}}},
             QJsonArray{QJsonObject{{"parent", 9}, {"title", "Orphan"}}},
-            QJsonArray{QJsonObject{{"title", ""}, {"due", "2026-11-14"}, {"url", "example.test"}}},
+            QJsonArray{"A reminder should be an object"},
         };
         for (const QJsonValue &reminders : malformed) {
             write(file, QJsonDocument(QJsonObject{{"reminders", reminders},
@@ -3255,6 +3394,73 @@ private slots:
         const Store disk(path);
         QCOMPARE(disk.lists().size(), 1);
         QCOMPARE(disk.reminders().size(), 1);
+    }
+
+    void oldBackupsKeepUntitledRemindersWithContent() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db"), file = dir.filePath("old.json");
+        write(file, R"({
+          "nudge": 1,
+          "lists": [{"name": "Home", "color": "blue", "sections": []}],
+          "reminders": [
+            {"id": 1, "title": "", "notes": "Words worth keeping", "list": "Home"},
+            {"id": 2, "title": "  ", "due": "2030-05-01", "url": "example.test", "tags": ["work"], "list": "Home"},
+            {"id": 3, "title": "", "list": "Home"},
+            {"id": 4, "title": "Subtask", "parent": 3, "list": "Home"},
+            {"id": 5, "title": " ", "notes": "  ", "tags": [" "], "list": "Home"}
+          ]
+        })");
+        const CliRun result = cliRun(path, {"import", file, "--json"});
+        QCOMPARE(result.code, 0);
+        QCOMPARE(cliJson(result).value("imported").toInt(), 4);
+        QCOMPARE(cliJson(result).value("skipped").toInt(), 1);
+
+        Store store(path);
+        Backend window(&store);
+        quiet(window, dir);
+        QCOMPARE(store.reminders().size(), 4);
+        QCOMPARE(store.reminder(1)->title, QString("Untitled reminder"));
+        QCOMPARE(store.reminder(1)->notes, QString("Words worth keeping"));
+        QCOMPARE(store.reminder(2)->due, QDate(2030, 5, 1));
+        QCOMPARE(store.reminder(2)->url, QString("example.test"));
+        QCOMPARE(store.reminder(2)->tags, QStringList{"work"});
+        QCOMPARE(store.reminder(4)->parentId, 3);
+        QCOMPARE(store.reminder(3)->title, QString("Untitled reminder"));
+    }
+
+    void aDatelessRepeatInAnOldBackupStartsToday() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db"), file = dir.filePath("old.json");
+        write(file, R"({"reminders": [
+            {"title": "A weekly reminder", "due": null, "repeat": "weekly:1"},
+            {"title": "A weekday reminder", "repeat": "weekdays"},
+            {"title": "Another reminder"}
+        ]})");
+        const QDate today = QDate::currentDate();
+        const CliRun result = cliRun(path, {"import", file, "--json"});
+        QCOMPARE(result.code, 0);
+        QCOMPARE(cliJson(result).value("imported").toInt(), 3);
+        const Store store(path);
+        QCOMPARE(store.reminder(1)->due, today);
+        QCOMPARE(store.reminder(1)->repeat, QString("weekly:1"));
+        QCOMPARE(store.reminder(2)->due, Repeat::firstWorkday(today));
+        QCOMPARE(store.reminder(2)->repeat, QString("weekdays"));
+        QVERIFY(!store.reminder(3)->due.isValid());
+    }
+
+    void showingAndExportingAnUntitledReminderUseTheSameTitle() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("reminders.db"));
+        Reminder entry;
+        entry.listId = addList(store, "Home");
+        entry.title = "  ";
+        entry.notes = "Written notes";
+        const auto id = store.put(entry);
+        const auto shown = cliJson(cliRun(store.path(), {"show", QString::number(id), "--json"}));
+        const auto exported = cliJson(cliRun(store.path(), {"export"})).value("reminders").toArray();
+        QCOMPARE(exported.size(), 1);
+        QCOMPARE(shown.value("title").toString(), QString("Untitled reminder"));
+        QCOMPARE(exported.first().toObject().value("title"), shown.value("title"));
     }
 
     void importAppendsRowsAndOnlyMapsRealParentIds() {
@@ -3494,6 +3700,26 @@ private slots:
         QVERIFY(scoped.arguments.contains("--reminder"));
     }
 
+    void openingAnAlertForADeletedReminderStillRaisesItsWindow() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("reminders.db"));
+        const auto list = addList(store, "Home");
+        const auto gone = add(store, list, "Was due");
+        const auto kept = add(store, list, "Still here");
+        Backend window(&store);
+        quiet(window, dir);
+        window.setViewKey("list:" + QString::number(list));
+        window.setSelectedId(kept);
+
+        Store command(store.path());
+        command.removeReminder(gone);
+        QVERIFY(store.reminder(gone)); // the watcher has yet to read the change
+        QSignalSpy raised(&window, &Backend::raise);
+        QVERIFY(window.revealReminder(store.path(), gone));
+        QCOMPARE(raised.count(), 1);
+        QCOMPARE(window.selectedId(), kept);
+    }
+
     void commandsSayWhenAWriteFails() {
         QTemporaryDir dir;
         const QString path = dir.filePath("nudge.db");
@@ -3703,27 +3929,33 @@ private slots:
     }
 
     void snoozingAnEarlyAlertCoversTheDueMoment() {
-        for (const auto *action : {"hour", "tomorrow"}) {
-            QTemporaryDir dir;
-            Store store(dir.filePath("reminders.db"));
-            const auto now = QDateTime(QDate::currentDate().addDays(2), QTime(10, 0));
-            const auto id = add(store, addList(store, "Home"), "Call", now.date(), 10 * 60);
-            Reminder r = *store.reminder(id);
-            r.early = 30;
-            QVERIFY(store.put(r));
-            FakeAlerts alerts;
-            Notifier notifier(&store, &alerts);
-            const auto early = now.addSecs(-1800);
-            notifier.check(early);
-            QCOMPARE(alerts.sent.size(), 1);
-            notifier.act(1, action, early);
-            notifier.check(now);
-            QCOMPARE(alerts.sent.size(), 1);
-            const auto returned = QDateTime::fromSecsSinceEpoch(store.reminder(id)->snoozeUntil);
-            notifier.check(returned);
-            notifier.check(returned.addSecs(60));
-            QCOMPARE(alerts.sent.size(), 2);
-            QCOMPARE(store.reminder(id)->alertedDue, now.toSecsSinceEpoch());
+        for (const QTimeZone &zone : {QTimeZone(QTimeZone::UTC), QTimeZone(QTimeZone::LocalTime)}) {
+            for (const auto *action : {"hour", "tomorrow"}) {
+                QTemporaryDir dir;
+                Store store(dir.filePath("reminders.db"));
+                const auto due = QDateTime(QDate::currentDate().addDays(2), QTime(10, 0), zone);
+                const auto id = add(store, addList(store, "Home"), "Call", due.date(), 10 * 60);
+                Reminder r = *store.reminder(id);
+                r.early = 30;
+                QVERIFY(store.put(r));
+                FakeAlerts alerts;
+                Notifier notifier(&store, &alerts);
+                const auto early = due.addSecs(-1800);
+                notifier.check(early.addSecs(-1));
+                QCOMPARE(alerts.sent.size(), 0);
+                notifier.check(early);
+                QCOMPARE(alerts.sent.size(), 1);
+                notifier.act(1, action, early);
+                notifier.check(due);
+                QCOMPARE(alerts.sent.size(), 1);
+                const auto returned = QDateTime::fromSecsSinceEpoch(store.reminder(id)->snoozeUntil, zone);
+                notifier.check(returned.addSecs(-1));
+                QCOMPARE(alerts.sent.size(), 1);
+                notifier.check(returned);
+                notifier.check(returned.addSecs(60));
+                QCOMPARE(alerts.sent.size(), 2);
+                QCOMPARE(store.reminder(id)->alertedDue, due.toSecsSinceEpoch());
+            }
         }
     }
 
@@ -4471,6 +4703,46 @@ private:
     }
 
 private slots:
+    void openingAnAlertScrollsToTheReminderAfterChangingViews() {
+        QmlWindow ui;
+        const qint64 listId = addList(ui.store, "Home");
+        qint64 target = 0;
+        {
+            Store::Tx tx(&ui.store);
+            for (int i = 0; i < 300; ++i) {
+                Reminder r;
+                r.listId = listId;
+                r.title = QString("Reminder %1").arg(i);
+                if (i % 2 == 0)
+                    r.notes = "Something to do";
+                r.position = i + 1;
+                target = ui.store.put(r);
+            }
+            QVERIFY(tx.commit());
+        }
+        QVERIFY(ui.open());
+        ui.backend.setViewKey("today");
+        auto *list = ui.window->findChild<QQuickItem *>("reminders");
+        QVERIFY(list);
+        auto visible = [&] {
+            const QQuickItem *row = ui.row(target);
+            if (!row)
+                return false;
+            const qreal top = row->mapToItem(list, QPointF()).y();
+            return top >= -1 && top + row->height() <= list->height() + 1;
+        };
+
+        QVERIFY(ui.backend.revealReminder(ui.store.path(), target));
+        QCOMPARE(ui.backend.viewListId(), listId);
+        QCOMPARE(ui.backend.selectedId(), target);
+        QTRY_VERIFY(visible());
+
+        list->setProperty("contentY", list->property("originY"));
+        QTRY_VERIFY(!visible());
+        QVERIFY(ui.backend.revealReminder(ui.store.path(), target));
+        QTRY_VERIFY(visible());
+    }
+
     // Text that came from elsewhere (an import, an agent, the command line)
     // shows as it is written: markup in it is not drawn, and no picture it
     // names is fetched just by being on screen.

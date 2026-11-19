@@ -31,14 +31,16 @@ void registerNudgeWindow(QObject *window) {
         bus.interface()->registerService(windowName, QDBusConnectionInterface::QueueService);
 }
 
-bool revealNudgeWindow(const QString &database, qint64 id) {
+bool openExistingNudgeWindow(const QString &database, qint64 id) {
     auto bus = QDBusConnection::sessionBus();
-    if (!bus.isConnected())
-        return false;
-    auto call = QDBusMessage::createMethodCall(windowName, windowPath, windowName, "revealReminder");
-    call.setArguments({database, id});
-    const QDBusReply<bool> result = bus.call(call, QDBus::Block, 1500);
-    return result.isValid() && result.value();
+    if (bus.isConnected()) {
+        auto call = QDBusMessage::createMethodCall(windowName, windowPath, windowName, "revealReminder");
+        call.setArguments({database, id});
+        const QDBusReply<bool> result = bus.call(call, QDBus::Block, 1500);
+        if (result.isValid())
+            return result.value();
+    }
+    return focusNudgeWindow();
 }
 
 // A Wayland window cannot raise itself, so the compositor is asked to. Without
@@ -206,7 +208,7 @@ void Notifier::check(const QDateTime &now) {
     const QScopedValueRollback checking(m_checking, true);
     m_store->reloadIfChanged();
     const qint64 seconds = now.toSecsSinceEpoch();
-    const QTimeZone zone = now.timeZone();
+    const QTimeZone zone = now.timeRepresentation();
     struct Pending {
         qint64 id;
         qint64 dueAt, earlyAt, when;
@@ -335,12 +337,13 @@ void Notifier::act(quint32 notification, const QString &action, const QDateTime 
         const QScopedValueRollback checking(m_checking, true);
         Store::Tx tx(m_store, {}, Store::Latest);
         const Reminder *r = tx ? m_store->reminder(id) : nullptr;
-        if (!r || r->completed || r->dueAt(now.timeZone()) != shown.dueAt)
+        const QTimeZone zone = now.timeRepresentation();
+        if (!r || r->completed || r->dueAt(zone) != shown.dueAt)
             return;
         if (action == "done") {
             m_store->complete(id, now);
         } else if (action == "hour" || action == "tomorrow") {
-            const QDateTime morning(now.date().addDays(1), QTime(Reminder::allDayAlertMinutes / 60, 0), now.timeZone());
+            const QDateTime morning(now.date().addDays(1), QTime(Reminder::allDayAlertMinutes / 60, 0), zone);
             const qint64 until = action == "hour" ? now.toSecsSinceEpoch() + 3600 : morning.toSecsSinceEpoch();
             m_store->setAlerted(id, r->alertedDue, r->alertedEarly, until);
         }

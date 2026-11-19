@@ -111,10 +111,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "nudge: --reminder needs a positive reminder id\n");
         return 1;
     }
-    if (!screenshot && !args.isSet("new-window")) {
-        if (revealNudgeWindow(Store::defaultPath(), reminder) || (!reminder && focusNudgeWindow()))
-            return 0;
-    }
+    if (!screenshot && !args.isSet("new-window") && openExistingNudgeWindow(Store::defaultPath(), reminder))
+        return 0;
 
     // The plainest style, as Hype uses: every control is drawn by Nudge's
     // own components, in the colors and states of the Omarchy theme.

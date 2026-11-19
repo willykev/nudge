@@ -66,9 +66,8 @@ Backend::Backend(Store *store, QObject *parent)
         [this](const QString &message) { emit notice(tr("Nudge could not save a change: %1").arg(message)); },
         Qt::QueuedConnection);
 
-    // A reminder left without a title is one the app never got to finish
-    // (it was killed mid-word), not something to be reminded of. One touched
-    // in the last few minutes may be another window's, still being typed.
+    // Drop abandoned drafts that had only the view's defaults. Leave recent
+    // drafts for other windows that may still have them open.
     m_store->cleanUpDrafts(now().toSecsSinceEpoch() - 10 * 60);
 
     m_view = View::fromKey(m_store->meta("view"));
@@ -463,6 +462,7 @@ void Backend::reveal(qint64 id) {
         if (m_model->rowOf(id) < 0)
             setViewKey(target.completed ? QStringLiteral("completed") : "list:" + QString::number(target.listId));
         setSelectedId(id);
+        emit revealSelection();
     }
     emit raise();
     focusNudgeWindow(QCoreApplication::applicationPid());
@@ -472,9 +472,8 @@ bool Backend::revealReminder(const QString &database, qlonglong id) {
     const QString here = QFileInfo(m_store->path()).canonicalFilePath();
     if (id < 0 || here.isEmpty() || QFileInfo(database).canonicalFilePath() != here)
         return false;
-    m_store->reloadIfChanged();
-    if (id && !m_store->reminder(id))
-        return false;
+    // If the reminder is gone, this window can still answer the request to
+    // open Nudge.
     reveal(id);
     return true;
 }
@@ -612,8 +611,11 @@ qint64 Backend::addReminder() {
     }
     // Known before the transaction ends and the view refreshes, so
     // selecting the new row does not close its undo step.
-    m_draftId = m_store->put(r);
-    const qint64 id = tx.commit() ? m_draftId : 0;
+    const qint64 id = m_draftId = m_store->put(r);
+    if (!tx.commit()) {
+        m_draftId = 0;
+        return 0;
+    }
     emit draftChanged();
     setSelectedId(id);
     return id;
@@ -669,7 +671,7 @@ void Backend::commitTitle(qint64 id, const QString &text) {
                 r.tags << tag;
         if (entry.priority)
             r.priority = entry.priority;
-        m_store->put(r);
+        m_store->put(r, entry.lateFold);
     }
     m_store->sealUndo();
 
@@ -699,7 +701,7 @@ void Backend::settleDraft() {
     const Reminder *r = m_store->reminder(id);
     if (!r)
         return;
-    if (!r->title.isEmpty() || !r->notes.trimmed().isEmpty() || !r->url.isEmpty()) {
+    if (r->hasText()) {
         if (r->draft) {
             Store::Tx tx(m_store, m_draftKey);
             Reminder saved = *r;
@@ -786,7 +788,6 @@ void Backend::setDueIn(qint64 id, int days) {
     const QDate date = now().date().addDays(days);
     edit(id, {}, [date](Reminder &r) {
         r.due = date;
-        r.lateFold = false;
         anchor(r);
     });
 }
@@ -796,7 +797,6 @@ void Backend::clearDue(qint64 id) {
     edit(id, {}, [](Reminder &r) {
         r.due = QDate();
         r.dueMinutes = -1;
-        r.lateFold = false;
         r.repeat.clear();
         r.repeatEnd = QDate();
         r.early = 0;
@@ -1070,8 +1070,6 @@ void Backend::setDateIso(qint64 id, const QString &iso) {
     if (!date.isValid())
         return;
     edit(id, {}, [date](Reminder &r) {
-        if (r.due != date)
-            r.lateFold = false;
         r.due = date;
         anchor(r);
     });
@@ -1079,7 +1077,7 @@ void Backend::setDateIso(qint64 id, const QString &iso) {
 
 bool Backend::setTime(qint64 id, const QString &text) {
     if (text.trimmed().isEmpty()) {
-        edit(id, {}, [](Reminder &r) { r.dueMinutes = -1; r.lateFold = false; });
+        edit(id, {}, [](Reminder &r) { r.dueMinutes = -1; });
         return true;
     }
     const int minutes = Dates::parseTime(text);
@@ -1089,8 +1087,6 @@ bool Backend::setTime(qint64 id, const QString &text) {
     }
     const QDateTime moment = now();
     edit(id, {}, [&](Reminder &r) {
-        if (r.dueMinutes != minutes)
-            r.lateFold = false;
         r.dueMinutes = minutes;
         // A time needs a day: the next one the clock shows that time on.
         if (!r.due.isValid()) {

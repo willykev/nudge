@@ -71,11 +71,14 @@ too.
 ## Set a date or repeat
 
 Type a date in a new reminder's title or press `D` to set it on its own.
-Numeric dates follow the desktop's date order. Use `2026-12-24` for a date
-you can paste in any language. The editable Date and Ends fields include the
-year so you can copy a date and paste it back. In the calendar, use the arrow
-keys to move a day or week, Page Up or Page Down to change months, and Return
-to pick a date.
+Numeric dates follow the desktop's date order. In a title, write `on 12/24`
+or `on 24.12.` to tell Nudge the number is a date. Use `2026-12-24` for a date
+you can paste in any language. A named date in a title can take a year from
+1900 through 2199 directly. For other years use a comma, as in `Dec 1, 1200`,
+or write the date out as `1200-12-01`. The editable Date and Ends fields
+include the year so you can copy a date and paste it back. In the calendar,
+use the arrow keys to move a day or week, Page Up or Page Down to change
+months, and Return to pick a date.
 
 For a time without am or pm, Nudge reads 1 to 7 as afternoon, 8 to 11 as
 morning, and 12 as noon. On a 12-hour clock that makes `5:30` 17:30.
@@ -193,6 +196,10 @@ window does, so `5:30` is the same time typed in either.
 `nudge export backup.json` saves a JSON backup. Choose a path separate from the
 open database and its journal files. `nudge import backup.json` reads it back
 with its lists, sections, subtasks, completion times, and pending snoozes.
+An older backup can contain a reminder with details and a blank title.
+It comes back as **Untitled reminder**. Import reports how many empty
+reminders it skipped. A repeat saved without a date starts today. A repeat
+set to Weekdays starts on Monday if today is a weekend.
 An invalid backup leaves the current reminders alone.
 
 ## What it does not do

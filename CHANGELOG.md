@@ -24,7 +24,9 @@ Fixes from a review of 0.1.3.
   First reminders share one default list, and two completions of the same
   repeat leave one entry in Completed.
 - Import checks the backup before saving it. Completion times and pending
-  snoozes travel with a backup, and large backups restore faster.
+  snoozes travel with a backup, and large backups restore faster. Older
+  backups keep untitled reminders with details and give repeats without a
+  date a starting day. Import reports any empty reminders it skips.
 
 ### Alerts
 
@@ -35,7 +37,8 @@ Fixes from a review of 0.1.3.
   An early alert set in days or weeks for an all-day reminder stays at 09:00
   when the clocks change. A group of early alerts says what is coming up.
 - **Open** on an alert shows its reminder, including alerts sent while the
-  window was closed.
+  window was closed. If the reminder has since been deleted, it brings the
+  existing window forward.
 
 ### Privacy
 
@@ -61,7 +64,8 @@ Fixes from a review of 0.1.3.
 - Typed dates understand the desktop's numeric date order, four-digit years,
   dayparts such as `tomorrow morning at 6`, and end dates such as
   `every 2 weeks until 2027-06-01`. Time ranges and unsupported monthly
-  rules stay in the title.
+  rules stay in the title. Write `on 12/24` to distinguish a short date
+  from a fraction or a version number.
 - Weekday repeats start on a day their rule includes. Completed occurrences
   stay in Completed when their parent moves forward. A repeating subtask
   carries on in its list when its one-off parent is completed.
@@ -69,7 +73,9 @@ Fixes from a review of 0.1.3.
 ### Window
 
 - A reminder stays in view while its title is being edited. An empty draft
-  appears only in the window where it is being written.
+  appears only in the window where it is being written. Cancelling the draft
+  removes it, even if the view gave it a date or flag. After a crash, Nudge
+  clears old empty drafts and recovers notes or links already saved in them.
 - The editable Date and Ends fields include the year. A language change keeps
   the selected repeat, early alert, and priority. The list deletion question
   groups digits in large counts.

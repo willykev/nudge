@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QSqlError>
 #include <QStandardPaths>
@@ -191,8 +192,12 @@ bool Reminder::sameContent(const Reminder &other) const {
     return fields(*this) == fields(other);
 }
 
+bool Reminder::hasText() const {
+    return !title.trimmed().isEmpty() || !notes.trimmed().isEmpty() || !url.trimmed().isEmpty();
+}
+
 bool Reminder::hasContent() const {
-    return !title.trimmed().isEmpty() || !notes.isEmpty() || !url.isEmpty() || due.isValid() ||
+    return hasText() || due.isValid() ||
            !repeat.isEmpty() || early || priority || flagged || !tags.isEmpty() || completed;
 }
 
@@ -852,7 +857,7 @@ bool Store::rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*f
     return true;
 }
 
-qint64 Store::put(Reminder r) {
+qint64 Store::put(Reminder r, bool keepFold) {
     if (!m_open)
         return 0;
     std::optional<Reminder> before;
@@ -866,8 +871,12 @@ qint64 Store::put(Reminder r) {
         return commit() ? r.id : 0;
     if (!r.title.trimmed().isEmpty())
         r.draft = false;
+    const QDate requestedDate = r.due;
     if (r.repeat == "weekdays" && (!before || r.due != before->due || r.repeat != before->repeat))
         r.due = Repeat::firstWorkday(r.due);
+    if (!r.due.isValid() || r.dueMinutes < 0 || r.due != requestedDate ||
+        (before && !keepFold && (r.due != before->due || r.dueMinutes != before->dueMinutes)))
+        r.lateFold = false;
     if (!r.due.isValid() && !r.repeat.isEmpty() && (!before || before->due.isValid() || before->repeat != r.repeat)) {
         fail(tr("A repeating reminder needs a date."));
         m_broken = true;
@@ -1004,28 +1013,48 @@ qsizetype Store::removeReminders(const QVector<qint64> &ids) {
 
 void Store::removeEmptyDraft(qint64 id) {
     Tx tx(this, {}, Latest);
-    if (const Reminder *r = tx ? reminder(id) : nullptr;
-        r && !r->hasContent() && childrenOf(id).isEmpty())
-        eraseReminder(id);
+    const Reminder *r = tx ? reminder(id) : nullptr;
+    if (!r || !r->draft || r->hasText() || !childrenOf(id).isEmpty())
+        return;
+    const QScopedValueRollback recording(m_recording, false);
+    eraseReminder(id);
+    if (tx.commit()) {
+        Rows gone;
+        gone.reminders.insert(id);
+        forget(gone, {}, gone);
+    }
 }
 
 void Store::cleanUpDrafts(qint64 olderThan) {
     // Check again under the lock in case another window has filled one in.
-    auto empty = [olderThan](const Reminder &r) { return !r.hasContent() && r.modifiedAt < olderThan; };
-    if (std::none_of(m_reminders.cbegin(), m_reminders.cend(), empty))
+    auto oldDraft = [olderThan](const Reminder &r) {
+        return r.modifiedAt < olderThan && (r.draft || !r.hasContent());
+    };
+    if (std::none_of(m_reminders.cbegin(), m_reminders.cend(), oldDraft))
         return;
     Tx tx(this, {}, Latest);
     if (!tx)
         return;
-    QVector<qint64> blank;
-    for (const Reminder &r : std::as_const(m_reminders))
-        if (empty(r))
+    QVector<qint64> blank, drafts;
+    for (const Reminder &r : std::as_const(m_reminders)) {
+        if (!oldDraft(r))
+            continue;
+        if (!r.hasText())
             blank.append(r.id);
-    const bool recording = std::exchange(m_recording, false);
-    const auto removed = removeReminders(blank);
-    const bool saved = tx.commit();
-    m_recording = recording;
-    if (removed && saved)
+        if (r.draft)
+            drafts.append(r.id);
+    }
+    const QScopedValueRollback recording(m_recording, false);
+    bool changed = removeReminders(blank) > 0;
+    // Keep drafts with notes, a link, or a subtask that still needs them.
+    for (qint64 id : drafts) {
+        if (const Reminder *r = reminder(id)) {
+            Reminder recovered = *r;
+            recovered.draft = false;
+            changed |= put(recovered) != 0;
+        }
+    }
+    if (tx.commit() && changed)
         clearUndo();
 }
 
@@ -1103,7 +1132,6 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
             history.completedAt = seconds;
             put(history);
             row.due = date;
-            row.lateFold = false;
         } else {
             row.completed = true;
             row.completedAt = seconds;
@@ -1153,7 +1181,6 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
                 child.parentId = 0;
                 child.position = r.position;
                 child.due = childNext;
-                child.lateFold = false;
                 put(child);
             } else {
                 advance(child, {});

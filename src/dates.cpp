@@ -369,7 +369,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             if (moment.isValid()) {
                 date = moment.date();
                 minutes = moment.time().hour() * 60 + moment.time().minute();
-                const QDateTime first(date, moment.time(), moment.timeZone(),
+                const QDateTime first(date, moment.time(), moment.timeRepresentation(),
                                       QDateTime::TransitionResolution::PreferBefore);
                 lateFold = first.isValid() && first < moment;
                 guessed = false;
@@ -405,7 +405,11 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             length = 2;
         }
         if (length) {
-            const int stated = year(words.value(i + 2));
+            int stated = year(words.value(i + 2));
+            // In a title a bare number could be an amount. A comma makes
+            // unusual years explicit, as does typing the date on its own.
+            if (!lenient && !tokens[i + 1].endsWith(',') && (stated < 1900 || stated >= 2200))
+                stated = 0;
             const QDate found = stated ? QDate(stated, monthNumber, day) : nextDate(monthNumber, day, today);
             if (found.isValid()) {
                 date = found;
@@ -421,8 +425,9 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
                 continue;
             }
         }
-        if ((word.contains('/') || word.contains('.')) &&
-            (lenient || beforeDate.contains(words.value(i - 1)) || closes(i + 1))) {
+        // A fraction or a version number can look like a short date. In a
+        // title, dates written this way need a cue such as "on" or "due".
+        if ((word.contains('/') || word.contains('.')) && (lenient || beforeDate.contains(words.value(i - 1)))) {
             if (const QDate local = numericDate(word, today, QLocale()); local.isValid()) {
                 date = local;
                 take(i, 1, beforeDate);

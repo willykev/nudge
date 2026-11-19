@@ -509,7 +509,7 @@ bool ReminderModel::isOverdue(const Reminder &r, const QDateTime &now) {
         return false;
     if (r.dueMinutes < 0)
         return r.due < now.date();
-    return r.dueAt(now.timeZone()) < now.toSecsSinceEpoch() - now.time().second();
+    return r.dueAt(now.timeRepresentation()) < now.toSecsSinceEpoch() - now.time().second();
 }
 
 QString ReminderModel::describeRepeat(const QString &rule) {

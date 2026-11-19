@@ -170,6 +170,7 @@ signals:
     void problemChanged();
     void backgroundChanged();
     void notice(const QString &text); // something worth a passing word
+    void revealSelection();          // scroll to the reminder from an alert
     void raise();                     // an alert was clicked: come to the front
 
 private slots:
