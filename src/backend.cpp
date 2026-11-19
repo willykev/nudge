@@ -464,19 +464,18 @@ QVariantMap Backend::selected() const {
     const Reminder *r = m_store->reminder(m_selectedId);
     if (!r)
         return {};
-    const QDate today = now().date();
     const Repeat repeat = Repeat::parse(r->repeat);
     return {
         {"id", r->id},
         {"title", r->title},
         {"notes", r->notes},
         {"url", r->url},
-        {"date", Dates::formatDay(r->due, today)},
+        {"date", Dates::formatEditableDate(r->due)},
         {"dateIso", r->due.isValid() ? r->due.toString(Qt::ISODate) : QString()},
         {"time", Dates::formatTime(r->dueMinutes)},
         {"repeatUnit", repeatUnits.value(repeat.unit)},
         {"repeatInterval", repeat.interval},
-        {"repeatEnd", Dates::formatDay(r->repeatEnd, today)},
+        {"repeatEnd", Dates::formatEditableDate(r->repeatEnd)},
         {"early", r->early},
         {"priority", r->priority},
         {"flagged", r->flagged},
@@ -639,9 +638,12 @@ void Backend::commitTitle(qint64 id, const QString &text) {
         if (entry.due.isValid()) {
             r.due = entry.due;
             r.dueMinutes = entry.minutes;
+            r.lateFold = entry.lateFold;
         }
-        if (!entry.repeat.isEmpty())
+        if (!entry.repeat.isEmpty()) {
             r.repeat = entry.repeat;
+            r.repeatEnd = entry.repeatEnd;
+        }
         for (const QString &tag : entry.tags)
             if (!r.tags.contains(tag, Qt::CaseInsensitive))
                 r.tags << tag;
@@ -692,6 +694,8 @@ QString Backend::quickPreview(const QString &text) const {
         parts << Dates::formatDue(entry.due, entry.minutes, now().date());
     if (!entry.repeat.isEmpty())
         parts << ReminderModel::describeRepeat(entry.repeat);
+    if (entry.repeatEnd.isValid())
+        parts << tr("Until %1").arg(Dates::formatDay(entry.repeatEnd, now().date()));
     for (const QString &tag : entry.tags)
         parts << "#" + tag;
     if (entry.priority)
@@ -756,6 +760,7 @@ void Backend::setDueIn(qint64 id, int days) {
     const QDate date = now().date().addDays(days);
     edit(id, {}, [date](Reminder &r) {
         r.due = date;
+        r.lateFold = false;
         anchor(r);
     });
 }
@@ -765,6 +770,7 @@ void Backend::clearDue(qint64 id) {
     edit(id, {}, [](Reminder &r) {
         r.due = QDate();
         r.dueMinutes = -1;
+        r.lateFold = false;
         r.repeat.clear();
         r.repeatEnd = QDate();
         r.early = 0;
@@ -1038,6 +1044,8 @@ void Backend::setDateIso(qint64 id, const QString &iso) {
     if (!date.isValid())
         return;
     edit(id, {}, [date](Reminder &r) {
+        if (r.due != date)
+            r.lateFold = false;
         r.due = date;
         anchor(r);
     });
@@ -1045,7 +1053,7 @@ void Backend::setDateIso(qint64 id, const QString &iso) {
 
 bool Backend::setTime(qint64 id, const QString &text) {
     if (text.trimmed().isEmpty()) {
-        edit(id, {}, [](Reminder &r) { r.dueMinutes = -1; });
+        edit(id, {}, [](Reminder &r) { r.dueMinutes = -1; r.lateFold = false; });
         return true;
     }
     const int minutes = Dates::parseTime(text);
@@ -1055,6 +1063,8 @@ bool Backend::setTime(qint64 id, const QString &text) {
     }
     const QDateTime moment = now();
     edit(id, {}, [&](Reminder &r) {
+        if (r.dueMinutes != minutes)
+            r.lateFold = false;
         r.dueMinutes = minutes;
         // A time needs a day: the next one the clock shows that time on.
         if (!r.due.isValid()) {

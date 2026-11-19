@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <type_traits>
+#include <tuple>
 #include <utility>
 #include <sys/stat.h>
 
@@ -45,7 +46,7 @@ bool sameFile(const QString &a, const QString &b) {
 const char *const reminderColumns =
     "id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
     "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
-    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at";
+    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at, late_fold";
 
 Reminder reminderFrom(const QSqlQuery &query) {
     Reminder r;
@@ -74,6 +75,7 @@ Reminder reminderFrom(const QSqlQuery &query) {
     r.alertedEarly = query.value(i++).toLongLong();
     r.snoozeUntil = query.value(i++).toLongLong();
     r.scheduledAt = query.value(i++).toLongLong();
+    r.lateFold = query.value(i++).toBool();
     return r;
 }
 
@@ -113,7 +115,11 @@ Reminder rebased(const Reminder &current, const Reminder &before, const Reminder
     TAKE(title);
     TAKE(notes);
     TAKE(url);
-    TAKE2(due, dueMinutes);
+    if (after.due != before.due || after.dueMinutes != before.dueMinutes || after.lateFold != before.lateFold) {
+        merged.due = after.due;
+        merged.dueMinutes = after.dueMinutes;
+        merged.lateFold = after.lateFold;
+    }
     TAKE2(repeat, repeatEnd);
     TAKE(early);
     TAKE(priority);
@@ -170,10 +176,12 @@ struct Store::Rows {
 };
 
 bool Reminder::sameContent(const Reminder &other) const {
-    Reminder a = *this, b = other;
-    a.alertedDue = a.alertedEarly = a.snoozeUntil = 0;
-    b.alertedDue = b.alertedEarly = b.snoozeUntil = 0;
-    return a == b;
+    auto fields = [](const Reminder &r) {
+        return std::tie(r.id, r.listId, r.sectionId, r.parentId, r.title, r.notes, r.url, r.due, r.dueMinutes,
+                        r.lateFold, r.repeat, r.repeatEnd, r.early, r.priority, r.flagged, r.tags, r.completed,
+                        r.completedAt, r.createdAt, r.modifiedAt, r.scheduledAt, r.position);
+    };
+    return fields(*this) == fields(other);
 }
 
 bool Reminder::hasContent() const {
@@ -181,11 +189,13 @@ bool Reminder::hasContent() const {
            !repeat.isEmpty() || early || priority || flagged || !tags.isEmpty() || completed;
 }
 
-qint64 Reminder::dueAt() const {
+qint64 Reminder::dueAt(const QTimeZone &zone) const {
     if (!due.isValid())
         return 0;
     const int minutes = dueMinutes >= 0 ? dueMinutes : allDayAlertMinutes;
-    return QDateTime(due, QTime(minutes / 60, minutes % 60)).toSecsSinceEpoch();
+    const auto resolve = lateFold ? QDateTime::TransitionResolution::PreferAfter
+                                  : QDateTime::TransitionResolution::LegacyBehavior;
+    return QDateTime(due, QTime(minutes / 60, minutes % 60), zone, resolve).toSecsSinceEpoch();
 }
 
 QString Store::defaultPath() {
@@ -289,10 +299,10 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
             "created_at INTEGER NOT NULL DEFAULT 0, modified_at INTEGER NOT NULL DEFAULT 0,"
             "position REAL NOT NULL DEFAULT 0, alerted_due INTEGER NOT NULL DEFAULT 0,"
             "alerted_early INTEGER NOT NULL DEFAULT 0, snooze_until INTEGER NOT NULL DEFAULT 0,"
-            "scheduled_at INTEGER NOT NULL DEFAULT 0)") &&
+            "scheduled_at INTEGER NOT NULL DEFAULT 0, late_fold INTEGER NOT NULL DEFAULT 0)") &&
         // Files from Nudge 0.1.3 and earlier: until a reminder is given a
         // moment anew, it was last given one when it was last changed.
-        migrateSchedule() &&
+        migrate() &&
         run("CREATE INDEX IF NOT EXISTS reminders_by_list ON reminders (list_id)") &&
         run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)") &&
         // Set only when it differs: any write tells every other process the
@@ -339,15 +349,18 @@ bool Store::hasColumn(const QString &table, const QString &column) {
     return false;
 }
 
-bool Store::migrateSchedule() {
-    if (hasColumn("reminders", "scheduled_at"))
+bool Store::migrate() {
+    if (hasColumn("reminders", "scheduled_at") && hasColumn("reminders", "late_fold"))
         return true;
     if (!run("BEGIN IMMEDIATE"))
         return false;
     // Another process may have added the column while this one waited.
     if ((hasColumn("reminders", "scheduled_at") ||
          (run("ALTER TABLE reminders ADD COLUMN scheduled_at INTEGER NOT NULL DEFAULT 0") &&
-          run("UPDATE reminders SET scheduled_at = modified_at"))) && run("COMMIT"))
+          run("UPDATE reminders SET scheduled_at = modified_at"))) &&
+        (hasColumn("reminders", "late_fold") ||
+         run("ALTER TABLE reminders ADD COLUMN late_fold INTEGER NOT NULL DEFAULT 0")) &&
+        run("COMMIT"))
         return true;
     m_db.rollback();
     return false;
@@ -378,7 +391,7 @@ void Store::prepare() {
     m_putReminder = QSqlQuery(m_db);
     m_putReminder.prepare(
         QString("INSERT OR REPLACE INTO reminders (%1) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .arg(QLatin1String(reminderColumns)));
     m_putList = QSqlQuery(m_db);
     m_putList.prepare("INSERT OR REPLACE INTO lists (id, name, color, position, sort) VALUES (?, ?, ?, ?, ?)");
@@ -667,6 +680,7 @@ bool Store::write(Reminder &r) {
     query.bindValue(i++, r.alertedEarly);
     query.bindValue(i++, r.snoozeUntil);
     query.bindValue(i++, r.scheduledAt);
+    query.bindValue(i++, r.lateFold);
     if (!query.exec()) {
         fail(query.lastError().text());
         m_broken = true;
@@ -812,6 +826,8 @@ qint64 Store::put(Reminder r) {
     begin();
     if (!rebase(r, before, &Store::fetchReminder))
         return commit() ? r.id : 0;
+    if (r.repeat == "weekdays" && (!before || r.due != before->due || r.repeat != before->repeat))
+        r.due = Repeat::firstWorkday(r.due);
     if (!r.due.isValid() && !r.repeat.isEmpty() && (!before || before->due.isValid() || before->repeat != r.repeat)) {
         fail(tr("A repeating reminder needs a date."));
         m_broken = true;
@@ -840,7 +856,8 @@ qint64 Store::put(Reminder r) {
         r.createdAt = now;
     r.modifiedAt = now;
     // A new date or time is a new moment to alert at, given it now.
-    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes;
+    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes ||
+                       before->lateFold != r.lateFold;
     if (moved || before->early != r.early)
         r.scheduledAt = now;
     if (before && moved)
@@ -1024,44 +1041,81 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
     const Reminder offered = *existing;
     Tx tx(this, {}, Latest);
     existing = tx ? reminder(id) : nullptr;
-    if (!existing || existing->completed || existing->due != offered.due || existing->dueMinutes != offered.dueMinutes)
+    if (!existing || existing->completed || existing->due != offered.due ||
+        existing->dueMinutes != offered.dueMinutes || existing->lateFold != offered.lateFold)
         return {};
     Reminder r = *existing;
     const qint64 seconds = now.toSecsSinceEpoch();
-    const Repeat rule = Repeat::parse(r.repeat);
-    const QDate next =
-        rule.repeats() && r.due.isValid() ? rule.upcoming(r.due, r.dueMinutes, now, r.repeatEnd) : QDate();
+    auto following = [&now](const Reminder &row) {
+        return Repeat::parse(row.repeat).upcoming(row.due, row.dueMinutes, now, row.repeatEnd);
+    };
+    auto advance = [this, seconds](Reminder row, const QDate &date) {
+        if (date.isValid()) {
+            Reminder history = row;
+            history.id = 0;
+            // This occurrence stays in Completed when the parent repeats.
+            history.parentId = 0;
+            history.repeat.clear();
+            history.repeatEnd = {};
+            history.completed = true;
+            history.completedAt = seconds;
+            put(history);
+            row.due = date;
+            row.lateFold = false;
+        } else {
+            row.completed = true;
+            row.completedAt = seconds;
+        }
+        put(row);
+    };
+    const QDate next = following(r);
 
     const QVector<qint64> children = childrenOf(id);
+    advance(r, next);
     if (next.isValid()) {
-        // What was done stays on record; the reminder itself moves on, with
-        // its subtasks to do again.
-        Reminder done = r;
-        done.id = 0;
-        done.repeat.clear();
-        done.repeatEnd = QDate();
-        done.completed = true;
-        done.completedAt = seconds;
-        put(done);
-        r.due = next;
-        put(r);
+        // Before history was detached, an occurrence could still be under
+        // this parent. It shares the series' title and creation timestamp.
+        QHash<QPair<QString, qint64>, QDate> liveRepeats;
+        for (qint64 childId : children) {
+            const Reminder &child = *reminder(childId);
+            if (!child.repeat.isEmpty())
+                liveRepeats.insert({child.title, child.createdAt}, child.due);
+        }
         for (qint64 childId : children) {
             Reminder child = *reminder(childId);
+            if (!child.completed || !child.repeat.isEmpty())
+                continue;
+            const QDate live = liveRepeats.value({child.title, child.createdAt});
+            if (live.isValid() && child.due.isValid() && child.due < live)
+                continue;
             child.completed = false;
             child.completedAt = 0;
             put(child);
         }
     } else {
-        r.completed = true;
-        r.completedAt = seconds;
-        put(r);
         for (qint64 childId : children) {
             Reminder child = *reminder(childId);
             if (child.completed)
                 continue;
-            child.completed = true;
-            child.completedAt = seconds;
-            put(child);
+            const QDate childNext = following(child);
+            if (childNext.isValid()) {
+                // The child still has something to do after its parent ends.
+                // Keep its completed occurrence with the parent.
+                Reminder history = child;
+                history.id = 0;
+                history.repeat.clear();
+                history.repeatEnd = {};
+                history.completed = true;
+                history.completedAt = seconds;
+                put(history);
+                child.parentId = 0;
+                child.position = r.position;
+                child.due = childNext;
+                child.lateFold = false;
+                put(child);
+            } else {
+                advance(child, {});
+            }
         }
     }
     const bool saved = tx.commit();
@@ -1120,7 +1174,9 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     }
     Reminder r = *state;
     r.modifiedAt = QDateTime::currentSecsSinceEpoch();
-    if (current && current->due == r.due && current->dueMinutes == r.dueMinutes) {
+    const bool sameMoment = current && current->due == r.due && current->dueMinutes == r.dueMinutes &&
+                            current->lateFold == r.lateFold;
+    if (sameMoment) {
         r.alertedDue = current->alertedDue;
         r.alertedEarly = current->alertedEarly;
         r.snoozeUntil = current->snoozeUntil;
@@ -1128,7 +1184,7 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
         r.snoozeUntil = 0;
     }
     // Given back another moment, it was given it just now.
-    if (current && current->due == r.due && current->dueMinutes == r.dueMinutes && current->early == r.early)
+    if (sameMoment && current->early == r.early)
         r.scheduledAt = current->scheduledAt;
     else
         r.scheduledAt = r.modifiedAt;

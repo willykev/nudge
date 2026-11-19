@@ -150,6 +150,7 @@ QJsonObject toJson(const Store &store, const Reminder &r) {
             {"parent", r.parentId ? QJsonValue(r.parentId) : QJsonValue()},
             {"due", r.due.isValid() ? QJsonValue(r.due.toString(Qt::ISODate)) : QJsonValue()},
             {"time", r.dueMinutes >= 0 ? QJsonValue(isoTime(r.dueMinutes)) : QJsonValue()},
+            {"lateFold", r.lateFold},
             {"repeat", r.repeat.isEmpty() ? QJsonValue() : QJsonValue(r.repeat)},
             {"repeatEnd", r.repeatEnd.isValid() ? QJsonValue(r.repeatEnd.toString(Qt::ISODate)) : QJsonValue()},
             {"early", r.early},
@@ -204,15 +205,20 @@ bool readRepeat(const QString &text, const QDate &today, Reminder &r) {
     Repeat repeat = Repeat::parse(word.contains(':') ? word : word + ":1");
     if (!repeat.repeats()) {
         const QuickEntry entry = Dates::parseQuick("x " + word, QDateTime(date, QTime(0, 0)));
+        if (entry.title != "x")
+            return false;
         repeat = Repeat::parse(entry.repeat);
         if (entry.due.isValid())
             date = entry.due;
+        if (entry.repeatEnd.isValid())
+            r.repeatEnd = entry.repeatEnd;
     }
     if (!repeat.repeats())
         return false;
     if (repeat.unit == Repeat::Weekdays)
-        while (date.dayOfWeek() > 5)
-            date = date.addDays(1);
+        date = Repeat::firstWorkday(date);
+    if (r.due != date)
+        r.lateFold = false;
     r.due = date;
     r.repeat = repeat.toString();
     anchor(r);
@@ -254,6 +260,7 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
     if (parser.isSet("url"))
         r.url = parser.value("url").trimmed();
     if (parser.isSet("due")) {
+        r.lateFold = false;
         const QString text = parser.value("due");
         if (text == "none") {
             // Without a date there is nothing to repeat or to alert ahead of.
@@ -271,6 +278,7 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
         }
     }
     if (parser.isSet("time")) {
+        r.lateFold = false;
         const QString text = parser.value("time");
         if (text == "none") {
             r.dueMinutes = -1;
@@ -334,8 +342,9 @@ int add(const QStringList &arguments) {
     command.parser.addOption({"literal", "Take the text as the title, word for word"});
     command.json();
     command.parser.process(arguments);
-    const QString text = command.arguments().join(' ').simplified();
-    if (text.isEmpty())
+    const bool literal = command.parser.isSet("literal");
+    const QString text = command.arguments().join(' ');
+    if (text.trimmed().isEmpty())
         return fail("Say what to be reminded of: nudge add \"Water the plants every friday\"");
 
     Store store;
@@ -348,12 +357,14 @@ int add(const QStringList &arguments) {
     Reminder r;
     QuickEntry entry;
     entry.title = text;
-    if (!command.parser.isSet("literal"))
+    if (!literal)
         entry = Dates::parseQuick(text, QDateTime::currentDateTime());
     r.title = entry.title;
     r.due = entry.due;
     r.dueMinutes = entry.minutes;
+    r.lateFold = entry.lateFold;
     r.repeat = entry.repeat;
+    r.repeatEnd = entry.repeatEnd;
     // A tag written twice is one tag, as quick entry in the window keeps it.
     // Not readTags, which would split one such as #home,office.
     for (const QString &tag : entry.tags)
@@ -380,6 +391,14 @@ int add(const QStringList &arguments) {
     const QString error = applyOptions(command.parser, store, r);
     if (!error.isEmpty())
         return fail(error);
+    if (entry.weekday && !command.parser.isSet("repeat") && r.due.isValid()) {
+        const QDate first = Repeat::onWeekday(r.due, entry.weekday);
+        if (first != r.due)
+            r.lateFold = false;
+        r.due = first;
+    }
+    if (r.due.isValid() && r.repeatEnd.isValid() && r.due > r.repeatEnd)
+        return fail("The repeat would start after it ends.");
     if (parentId && r.listId != listId)
         return fail("A subtask lives in its parent's list; leave out --list.");
 
@@ -567,8 +586,12 @@ int list(const QStringList &arguments) {
             return fail(QString("No list named %1. %2").arg(command.parser.value("list"), listNames(store)));
         filters << View{View::List, found->id, {}};
     }
-    if (command.parser.isSet("tag"))
-        filters << View{View::Tag, 0, QString(command.parser.value("tag")).remove('#')};
+    if (command.parser.isSet("tag")) {
+        QString tag = command.parser.value("tag");
+        while (tag.startsWith('#'))
+            tag.remove(0, 1);
+        filters << View{View::Tag, 0, tag};
+    }
     if (command.parser.isSet("search"))
         filters << View{View::Search, 0, command.parser.value("search").simplified()};
     if (!named && !filters.isEmpty())
@@ -944,6 +967,7 @@ int importAll(const QStringList &arguments) {
             r.due = QDate::fromString(entry.value("due").toString(), Qt::ISODate);
             const QTime time = QTime::fromString(entry.value("time").toString(), "HH:mm");
             r.dueMinutes = r.due.isValid() && time.isValid() ? time.hour() * 60 + time.minute() : -1;
+            r.lateFold = r.dueMinutes >= 0 && entry.value("lateFold").toBool();
             r.repeat = Repeat::parse(entry.value("repeat").toString()).toString();
             r.repeatEnd = QDate::fromString(entry.value("repeatEnd").toString(), Qt::ISODate);
             r.early = entry.value("early").toInt();

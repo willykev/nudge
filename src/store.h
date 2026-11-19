@@ -8,6 +8,7 @@
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QTimeZone>
 #include <QTimer>
 #include <QVector>
 #include <functional>
@@ -43,6 +44,7 @@ struct Reminder {
     QString title, notes, url;
     QDate due;           // invalid when there is no date
     int dueMinutes = -1; // minutes after midnight, -1 for all day
+    bool lateFold = false; // elapsed-time entry in the second hour when the clock goes back
     QString repeat;      // see recurrence.h
     QDate repeatEnd;
     int early = 0;       // minutes before due for an extra alert, 0 for none
@@ -65,7 +67,7 @@ struct Reminder {
     bool operator==(const Reminder &) const = default;
     bool hasContent() const;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
-    qint64 dueAt() const; // when the alert is due, 0 without a date
+    qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
 };
 
@@ -184,7 +186,7 @@ private:
     void prepare();
     bool load(bool locked = false);
     std::optional<bool> readChanges(bool locked = false);
-    bool migrateSchedule();
+    bool migrate();
     void repair();
     qint64 pragma(const char *name);
     qint64 dataVersion();

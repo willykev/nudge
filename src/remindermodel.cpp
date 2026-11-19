@@ -76,10 +76,12 @@ Row item(const Reminder *reminder, int depth = 0) {
 
 bool matches(const Reminder &r, const QStringList &terms) {
     for (const QString &term : terms) {
-        bool found = r.title.contains(term, Qt::CaseInsensitive) || r.notes.contains(term, Qt::CaseInsensitive) ||
-                     r.url.contains(term, Qt::CaseInsensitive);
+        const bool tagOnly = term.size() > 1 && term.startsWith('#');
+        const QString word = tagOnly ? term.mid(1) : term;
+        bool found = !tagOnly && (r.title.contains(word, Qt::CaseInsensitive) ||
+                                 r.notes.contains(word, Qt::CaseInsensitive) || r.url.contains(word, Qt::CaseInsensitive));
         for (int i = 0; !found && i < r.tags.size(); ++i)
-            found = r.tags[i].contains(term, Qt::CaseInsensitive);
+            found = r.tags[i].contains(word, Qt::CaseInsensitive);
         if (!found)
             return false;
     }
@@ -489,9 +491,9 @@ void ReminderModel::show(const QVector<Row> &next, bool reset) {
 bool ReminderModel::isOverdue(const Reminder &r, const QDateTime &now) {
     if (r.completed || !r.due.isValid())
         return false;
-    if (r.due != now.date())
+    if (r.dueMinutes < 0)
         return r.due < now.date();
-    return r.dueMinutes >= 0 && r.dueMinutes < now.time().hour() * 60 + now.time().minute();
+    return r.dueAt(now.timeZone()) < now.toSecsSinceEpoch() - now.time().second();
 }
 
 QString ReminderModel::describeRepeat(const QString &rule) {
