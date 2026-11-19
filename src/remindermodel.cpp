@@ -76,10 +76,12 @@ Row item(const Reminder *reminder, int depth = 0) {
 
 bool matches(const Reminder &r, const QStringList &terms) {
     for (const QString &term : terms) {
-        bool found = r.title.contains(term, Qt::CaseInsensitive) || r.notes.contains(term, Qt::CaseInsensitive) ||
-                     r.url.contains(term, Qt::CaseInsensitive);
+        const bool tagOnly = term.size() > 1 && term.startsWith('#');
+        const QString word = tagOnly ? term.mid(1) : term;
+        bool found = !tagOnly && (r.title.contains(word, Qt::CaseInsensitive) ||
+                                 r.notes.contains(word, Qt::CaseInsensitive) || r.url.contains(word, Qt::CaseInsensitive));
         for (int i = 0; !found && i < r.tags.size(); ++i)
-            found = r.tags[i].contains(term, Qt::CaseInsensitive);
+            found = r.tags[i].contains(word, Qt::CaseInsensitive);
         if (!found)
             return false;
     }
@@ -128,15 +130,20 @@ QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &
     auto shown = [&](const Reminder &r) {
         return !r.completed || options.showCompleted || options.lingering.contains(r.id);
     };
+    auto belongs = [&](const Reminder &r) {
+        return r.id == options.draftId || (!r.draft && r.hasContent());
+    };
 
     if (view.isTree()) {
         // One pass sorts every reminder under its list or its parent.
         QHash<qint64, Items> top, children;
         for (const Reminder &r : store.reminders()) {
+            if (!belongs(r))
+                continue;
             if (view.kind == View::List && r.listId != view.listId)
                 continue;
             const Reminder *parent = r.parentId ? store.reminder(r.parentId) : nullptr;
-            if (parent && parent->listId == r.listId)
+            if (parent && parent->listId == r.listId && belongs(*parent))
                 children[r.parentId].append(&r);
             else
                 top[r.listId].append(&r);
@@ -197,6 +204,8 @@ QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &
     Items items;
     const QStringList terms = view.text.split(' ', Qt::SkipEmptyParts);
     for (const Reminder &r : store.reminders()) {
+        if (!belongs(r))
+            continue;
         const bool lingering = options.lingering.contains(r.id);
         bool include = false;
         switch (view.kind) {
@@ -425,6 +434,15 @@ void ReminderModel::show(const QVector<Row> &next, bool reset) {
         replace();
         return;
     }
+    qsizetype shared = 0;
+    for (const Row &row : std::as_const(m_rows))
+        shared += nextKeys.contains(row.key);
+    // Small changes keep their animations. A large set of interleaved
+    // insertions or removals would shift the row vector over and over.
+    if (next.size() + m_rows.size() - 2 * shared > 128) {
+        replace();
+        return;
+    }
 
     // Rows that are gone, from the bottom up so earlier indexes hold.
     for (int i = m_rows.size() - 1; i >= 0; --i) {
@@ -489,9 +507,9 @@ void ReminderModel::show(const QVector<Row> &next, bool reset) {
 bool ReminderModel::isOverdue(const Reminder &r, const QDateTime &now) {
     if (r.completed || !r.due.isValid())
         return false;
-    if (r.due != now.date())
+    if (r.dueMinutes < 0)
         return r.due < now.date();
-    return r.dueMinutes >= 0 && r.dueMinutes < now.time().hour() * 60 + now.time().minute();
+    return r.dueAt(now.timeRepresentation()) < now.toSecsSinceEpoch() - now.time().second();
 }
 
 QString ReminderModel::describeRepeat(const QString &rule) {

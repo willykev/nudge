@@ -8,6 +8,7 @@
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QTimeZone>
 #include <QTimer>
 #include <QVector>
 #include <functional>
@@ -43,6 +44,7 @@ struct Reminder {
     QString title, notes, url;
     QDate due;           // invalid when there is no date
     int dueMinutes = -1; // minutes after midnight, -1 for all day
+    bool lateFold = false; // elapsed-time entry in the second hour when the clock goes back
     QString repeat;      // see recurrence.h
     QDate repeatEnd;
     int early = 0;       // minutes before due for an extra alert, 0 for none
@@ -50,22 +52,25 @@ struct Reminder {
     bool flagged = false;
     QStringList tags;
     bool completed = false;
+    bool draft = false; // still being written in the window that started it
     qint64 completedAt = 0; // seconds since the epoch, like the two below
     qint64 createdAt = 0;
     qint64 modifiedAt = 0;
-    // When it was last given the moment it alerts at (its date, time, or
-    // early alert), which other edits leave alone: a moment that had already
-    // gone by then is not announced. 0 in a row written by Nudge 0.1.3 or
-    // earlier, which only had modifiedAt.
+    // The due moment and early lead can be set independently. A moment that
+    // was already past when it was assigned is left quiet.
     qint64 scheduledAt = 0;
+    qint64 earlyScheduledAt = 0;
     double position = 0;
     // Alert bookkeeping: the moments already announced, and a snooze.
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
 
     bool operator==(const Reminder &) const = default;
+    bool hasText() const; // title, notes, or link entered for a draft
+    bool hasContent() const;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
-    qint64 dueAt() const; // when the alert is due, 0 without a date
+    qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
+    qint64 earlySince() const { return earlyScheduledAt ? earlyScheduledAt : scheduledSince(); }
 };
 
 // Every list, section, and reminder, held in memory and written through to
@@ -76,22 +81,30 @@ class Store : public QObject {
     Q_OBJECT
 
 public:
+    enum Snapshot { Cached, Latest };
+
     // Groups the changes made while it is alive into one undo step.
     class Tx {
     public:
-        explicit Tx(Store *store, const QString &mergeKey = {}) : m_store(store) { store->begin(mergeKey); }
-        ~Tx() { m_store->commit(); }
+        explicit Tx(Store *store, const QString &mergeKey = {}, Snapshot snapshot = Cached)
+            : m_store(store), m_ready(store->begin(mergeKey, snapshot)) {}
+        ~Tx() { if (m_store) m_store->commit(); }
         Tx(const Tx &) = delete;
         Tx &operator=(const Tx &) = delete;
+        explicit operator bool() const { return m_ready; }
+        bool commit();
 
     private:
         Store *m_store;
+        bool m_ready;
     };
 
     explicit Store(const QString &path = {}, QObject *parent = nullptr);
     ~Store() override;
 
     static QString defaultPath();
+    static bool isDatabaseFile(const QString &database, const QString &path);
+    static QString copyForPicture(const QString &source, const QString &destination);
     bool isOpen() const { return m_open; }
     QString error() const { return m_error; }
     QString path() const { return m_path; }
@@ -109,22 +122,26 @@ public:
     // A transaction reaches the disk whole or not at all. When a write in it
     // fails, failed() says why, the rest is skipped, and memory and undo are
     // left as they were; commit() then returns false.
-    void begin(const QString &mergeKey = {});
+    bool begin(const QString &mergeKey = {}, Snapshot snapshot = Cached);
     bool commit();
     // Each returns the id, or 0 when it could not be saved. An open reminder
     // reopens a completed parent, in the same step.
-    qint64 put(Reminder reminder);
+    // An edit that moves a reminder uses the normal clock time unless a
+    // relative entry explicitly chose the later fold for the new time.
+    qint64 put(Reminder reminder, bool keepFold = false);
     qint64 put(TaskList list);
     qint64 put(Section section);
     void removeReminder(qint64 id); // and its subtasks
-    void removeReminders(const QVector<qint64> &ids); // exactly these
+    qsizetype removeReminders(const QVector<qint64> &ids); // keep a parent if any child stays
+    void removeEmptyDraft(qint64 id);
+    void cleanUpDrafts(qint64 olderThan);
     void removeList(qint64 id);     // and everything in it
     void removeSection(qint64 id);  // its reminders stay in the list
 
     // Completing a repeating reminder leaves a completed copy behind and
     // moves the reminder to its next date, which is returned.
-    QDate complete(qint64 id, const QDateTime &now);
-    void reopen(qint64 id); // and its parent, if that was completed
+    QDate complete(qint64 id, const QDateTime &now, bool *completed = nullptr);
+    bool reopen(qint64 id); // and its parent, if that was completed
 
     // Undo and redo leave alone what another process has changed since:
     // the steps that would write over it are forgotten, and the rest stay.
@@ -156,6 +173,7 @@ private:
     template <typename T> struct Delta {
         qint64 id = 0;
         std::optional<T> before, after;
+        bool keepOnUndo = false;
     };
     struct UndoEntry {
         QString mergeKey;
@@ -168,9 +186,12 @@ private:
     struct Rows; // by table
 
     bool run(const QString &sql);
+    bool enableWal();
     void fail(const QString &message);
     void prepare();
-    bool load();
+    bool load(bool locked = false);
+    std::optional<bool> readChanges(bool locked = false);
+    bool migrate();
     void repair();
     qint64 pragma(const char *name);
     qint64 dataVersion();
@@ -210,6 +231,9 @@ private:
     bool m_open = false;
     bool m_recording = true;
     bool m_broken = false; // a write in the transaction under way failed
+    bool m_current = false; // the locked snapshot includes every outside write
+    bool m_externalChange = false;
+    bool m_undoChanged = false;
     int m_depth = 0;
     qint64 m_dataVersion = 0;
 

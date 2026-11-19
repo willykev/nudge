@@ -1,4 +1,6 @@
 {
+  "%n reminders": {"one": "%n herinnering", "other": "%n herinneringen"},
+  "%n reminders are coming up": {"one": "%n herinnering komt eraan", "other": "%n herinneringen komen eraan"},
   "%n reminders are due": {
     "one": "%n herinnering vervalt",
     "other": "%n herinneringen vervallen"
@@ -11,6 +13,7 @@
   "2 hours before": "2 uur eerder",
   "30 minutes before": "30 minuten eerder",
   "5 minutes before": "5 minuten eerder",
+  "A repeating reminder needs a date.": "Een terugkerende herinnering heeft een datum nodig.",
   "Add": "Voeg toe",
   "All": "Alles",
   "Back to a reminder of its own": "Weer een eigen herinnering",
@@ -28,10 +31,6 @@
   "Date Created": "Aanmaakdatum",
   "Dates": "Datums",
   "Delete": "Verwijder",
-  "Delete %n completed reminders?": {
-    "one": "%n voltooide herinnering verwijderen?",
-    "other": "%n voltooide herinneringen verwijderen?"
-  },
   "Delete completed": "Verwijder voltooide",
   "Delete Completed": "Verwijder voltooide",
   "Delete List": "Verwijder lijst",
@@ -76,9 +75,10 @@
   "High": "Hoog",
   "In a Week": "Over een week",
   "In an Hour": "Over een uur",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "De herinnering is in een ander venster of met een opdracht verwijderd. De wijziging is niet opgeslagen.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "De herinnering wordt mee verwijderd. Met Ongedaan maken komt die terug.",
-    "other": "De %n herinneringen worden mee verwijderd. Met Ongedaan maken komen ze terug."
+    "other": "De %Ln herinneringen worden mee verwijderd. Met Ongedaan maken komen ze terug."
   },
   "Link": "Link",
   "List": "Lijst",
@@ -159,8 +159,9 @@
   "Sorted by %1": "Gesorteerd op %1",
   "Tags": "Tags",
   "The desktop did not accept a notification: %1": "Het bureaublad accepteerde een melding niet: %1",
+  "The reminder’s list, section, or parent has changed.": "De lijst, sectie of bovenliggende herinnering is gewijzigd.",
   "There are no completed reminders to delete": "Er zijn geen voltooide herinneringen om te verwijderen",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Deze lijst is gesorteerd op %1. Druk op S voor Handmatige volgorde om te herschikken.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Deze lijst is gesorteerd op %1. Kies Handmatige volgorde om haar opnieuw te rangschikken.",
   "This sheet": "Dit overzicht",
   "Time": "Tijd",
   "Title": "Titel",
@@ -170,6 +171,8 @@
   "Type a date": "Typ een datum",
   "Undo": "Ongedaan maken",
   "Undo brings them back.": "Met Ongedaan maken komen ze terug.",
+  "Until %1": "Tot %1",
+  "Untitled reminder": "Herinnering zonder titel",
   "Weekdays": "Werkdagen",
   "Weekly": "Wekelijks",
   "When": "Wanneer",

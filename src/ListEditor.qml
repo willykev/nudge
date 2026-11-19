@@ -9,19 +9,24 @@ Popup {
     property var app
     property var listId: 0
     property string chosen: ""
+    property string originalName: ""
+    property string originalColor: ""
 
     function openFor(id) {
         const info = id ? backend.listInfo(id) : {}
         listId = id
         chosen = id ? info.color : backend.palette[backend.lists.length % backend.palette.length]
-        name.text = id ? info.name : ""
+        originalColor = chosen
+        originalName = id ? info.name : ""
+        name.text = originalName
         open()
         name.forceActiveFocus()
         name.selectAll()
     }
     function save() {
         if (listId)
-            backend.updateList(listId, name.text, chosen)
+            backend.updateList(listId, name.text === originalName ? "" : name.text,
+                               chosen === originalColor ? "" : chosen)
         else
             backend.addList(name.text, chosen)
         close()

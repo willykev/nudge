@@ -1,6 +1,9 @@
 {
+  "%n reminders": {"one": "%n rappel", "many": "%n rappels", "other": "%n rappels"},
+  "%n reminders are coming up": {"one": "%n rappel arrive bientôt", "many": "%n rappels arrivent bientôt", "other": "%n rappels arrivent bientôt"},
   "%n reminders are due": {
     "one": "%n rappel arrive à échéance",
+    "many": "%n rappels arrivent à échéance",
     "other": "%n rappels arrivent à échéance"
   },
   "1 day before": "1 jour avant",
@@ -11,6 +14,7 @@
   "2 hours before": "2 heures avant",
   "30 minutes before": "30 minutes avant",
   "5 minutes before": "5 minutes avant",
+  "A repeating reminder needs a date.": "Un rappel récurrent doit avoir une date.",
   "Add": "Ajouter",
   "All": "Tous",
   "Back to a reminder of its own": "Redevenir un rappel à part entière",
@@ -28,16 +32,13 @@
   "Date Created": "Date de création",
   "Dates": "Dates",
   "Delete": "Supprimer",
-  "Delete %n completed reminders?": {
-    "one": "Supprimer %n rappel terminé ?",
-    "other": "Supprimer %n rappels terminés ?"
-  },
   "Delete completed": "Supprimer les terminés",
   "Delete Completed": "Supprimer les terminés",
   "Delete List": "Supprimer la liste",
   "Delete “%1”?": "Supprimer « %1 » ?",
   "Deleted %n completed reminders": {
     "one": "%n rappel terminé supprimé",
+    "many": "%n rappels terminés supprimés",
     "other": "%n rappels terminés supprimés"
   },
   "Deleted “%1”. Undo brings it back.": "« %1 » supprimé. Annuler le restaure.",
@@ -54,18 +55,22 @@
   "Ends": "Fin",
   "Every %n days": {
     "one": "Tous les %n jours",
+    "many": "Tous les %n jours",
     "other": "Tous les %n jours"
   },
   "Every %n months": {
     "one": "Tous les %n mois",
+    "many": "Tous les %n mois",
     "other": "Tous les %n mois"
   },
   "Every %n weeks": {
     "one": "Toutes les %n semaines",
+    "many": "Toutes les %n semaines",
     "other": "Toutes les %n semaines"
   },
   "Every %n years": {
     "one": "Tous les %n ans",
+    "many": "Tous les %n ans",
     "other": "Tous les %n ans"
   },
   "First or last": "Premier ou dernier",
@@ -76,9 +81,11 @@
   "High": "Haute",
   "In a Week": "Dans une semaine",
   "In an Hour": "Dans une heure",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "Le rappel a été supprimé dans une autre fenêtre ou par une commande. La modification n’a pas été enregistrée.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Son rappel est supprimé avec elle. Annuler le restaure.",
-    "other": "Ses %n rappels sont supprimés avec elle. Annuler les restaure."
+    "many": "Ses %Ln rappels sont supprimés avec elle. Annuler les restaure.",
+    "other": "Ses %Ln rappels sont supprimés avec elle. Annuler les restaure."
   },
   "Link": "Lien",
   "List": "Liste",
@@ -159,8 +166,9 @@
   "Sorted by %1": "Trié par %1",
   "Tags": "Étiquettes",
   "The desktop did not accept a notification: %1": "Le bureau n’a pas accepté une notification : %1",
+  "The reminder’s list, section, or parent has changed.": "La liste, la section ou le rappel parent a changé.",
   "There are no completed reminders to delete": "Aucun rappel terminé à supprimer",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Cette liste est triée par %1. Appuyez sur S pour Ordre manuel et la réorganiser.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Cette liste est triée par %1. Choisissez l’ordre manuel pour la réorganiser.",
   "This sheet": "Cette feuille",
   "Time": "Heure",
   "Title": "Titre",
@@ -170,6 +178,8 @@
   "Type a date": "Saisir une date",
   "Undo": "Annuler",
   "Undo brings them back.": "Annuler les restaure.",
+  "Until %1": "Jusqu’au %1",
+  "Untitled reminder": "Rappel sans titre",
   "Weekdays": "Jours ouvrés",
   "Weekly": "Toutes les semaines",
   "When": "Quand",

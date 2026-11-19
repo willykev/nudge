@@ -1,6 +1,9 @@
 {
+  "%n reminders": {"one": "%n recordatorio", "many": "%n recordatorios", "other": "%n recordatorios"},
+  "%n reminders are coming up": {"one": "Se acerca %n recordatorio", "many": "Se acercan %n recordatorios", "other": "Se acercan %n recordatorios"},
   "%n reminders are due": {
     "one": "%n recordatorio vence",
+    "many": "%n recordatorios vencen",
     "other": "%n recordatorios vencen"
   },
   "1 day before": "1 día antes",
@@ -11,6 +14,7 @@
   "2 hours before": "2 horas antes",
   "30 minutes before": "30 minutos antes",
   "5 minutes before": "5 minutos antes",
+  "A repeating reminder needs a date.": "Un recordatorio recurrente necesita una fecha.",
   "Add": "Agregar",
   "All": "Todos",
   "Back to a reminder of its own": "Volver a recordatorio independiente",
@@ -28,16 +32,13 @@
   "Date Created": "Fecha de creación",
   "Dates": "Fechas",
   "Delete": "Eliminar",
-  "Delete %n completed reminders?": {
-    "one": "¿Eliminar %n recordatorio completado?",
-    "other": "¿Eliminar %n recordatorios completados?"
-  },
   "Delete completed": "Eliminar completados",
   "Delete Completed": "Eliminar completados",
   "Delete List": "Eliminar lista",
   "Delete “%1”?": "¿Eliminar “%1”?",
   "Deleted %n completed reminders": {
     "one": "Se eliminó %n recordatorio completado",
+    "many": "Se eliminaron %n recordatorios completados",
     "other": "Se eliminaron %n recordatorios completados"
   },
   "Deleted “%1”. Undo brings it back.": "Se eliminó “%1”. Deshacer lo recupera.",
@@ -54,18 +55,22 @@
   "Ends": "Termina",
   "Every %n days": {
     "one": "Cada %n día",
+    "many": "Cada %n días",
     "other": "Cada %n días"
   },
   "Every %n months": {
     "one": "Cada %n mes",
+    "many": "Cada %n meses",
     "other": "Cada %n meses"
   },
   "Every %n weeks": {
     "one": "Cada %n semana",
+    "many": "Cada %n semanas",
     "other": "Cada %n semanas"
   },
   "Every %n years": {
     "one": "Cada %n año",
+    "many": "Cada %n años",
     "other": "Cada %n años"
   },
   "First or last": "Primero o último",
@@ -76,9 +81,11 @@
   "High": "Alta",
   "In a Week": "En una semana",
   "In an Hour": "En una hora",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "Se eliminó en otra ventana o mediante un comando, por lo que el cambio no se guardó.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Su recordatorio se elimina con ella. Deshacer lo recupera.",
-    "other": "Sus %n recordatorios se eliminan con ella. Deshacer los recupera."
+    "many": "Sus %Ln recordatorios se eliminan con ella. Deshacer los recupera.",
+    "other": "Sus %Ln recordatorios se eliminan con ella. Deshacer los recupera."
   },
   "Link": "Enlace",
   "List": "Lista",
@@ -159,8 +166,9 @@
   "Sorted by %1": "Ordenado por %1",
   "Tags": "Etiquetas",
   "The desktop did not accept a notification: %1": "El escritorio no aceptó una notificación: %1",
+  "The reminder’s list, section, or parent has changed.": "Cambió la lista, la sección o el recordatorio principal.",
   "There are no completed reminders to delete": "No hay recordatorios completados que eliminar",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Esta lista está ordenada por %1. Presiona S para Orden manual y reorganizarla.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Esta lista está ordenada por %1. Elige Orden manual para reorganizarla.",
   "This sheet": "Esta hoja",
   "Time": "Hora",
   "Title": "Título",
@@ -170,6 +178,8 @@
   "Type a date": "Escribir una fecha",
   "Undo": "Deshacer",
   "Undo brings them back.": "Deshacer los recupera.",
+  "Until %1": "Hasta %1",
+  "Untitled reminder": "Recordatorio sin título",
   "Weekdays": "Entre semana",
   "Weekly": "Semanal",
   "When": "Cuándo",

@@ -1,6 +1,13 @@
 #include "recurrence.h"
 
 #include <QStringList>
+#include <QTimeZone>
+
+namespace {
+QDate representable(const QDate &date) {
+    return date.isValid() && date.year() >= 1 && date.year() <= 9999 ? date : QDate();
+}
+}
 
 Repeat Repeat::parse(const QString &rule) {
     Repeat repeat;
@@ -33,29 +40,33 @@ QString Repeat::toString() const {
     return {};
 }
 
+QDate Repeat::onWeekday(const QDate &date, int day) {
+    return representable(date.addDays((day - date.dayOfWeek() + 7) % 7));
+}
+
+QDate Repeat::firstWorkday(const QDate &date) {
+    return date.dayOfWeek() > 5 ? onWeekday(date, 1) : representable(date);
+}
+
 QDate Repeat::after(const QDate &date) const {
-    if (!date.isValid())
-        return {};
+    if (!representable(date).isValid())
+        return QDate();
     const int step = qMax(1, interval);
     const int day = anchorDay > 0 ? anchorDay : date.day();
     switch (unit) {
     case Daily:
-        return date.addDays(step);
-    case Weekdays: {
-        QDate next = date.addDays(1);
-        while (next.dayOfWeek() > 5)
-            next = next.addDays(1);
-        return next;
-    }
+        return representable(date.addDays(step));
+    case Weekdays:
+        return firstWorkday(date.addDays(1));
     case Weekly:
-        return date.addDays(7LL * step);
+        return representable(date.addDays(7LL * step));
     case Monthly: {
         const QDate month = QDate(date.year(), date.month(), 1).addMonths(step);
-        return QDate(month.year(), month.month(), qMin(day, month.daysInMonth()));
+        return representable(QDate(month.year(), month.month(), qMin(day, month.daysInMonth())));
     }
     case Yearly: {
         const QDate month(date.year() + step, date.month(), 1);
-        return QDate(month.year(), month.month(), qMin(day, month.daysInMonth()));
+        return representable(QDate(month.year(), month.month(), qMin(day, month.daysInMonth())));
     }
     case Never:
         break;
@@ -65,16 +76,34 @@ QDate Repeat::after(const QDate &date) const {
 
 QDate Repeat::upcoming(const QDate &due, const QDate &today, const QDate &end) const {
     QDate next = after(due);
-    // A reminder that sat overdue for a month should come back next, not
-    // thirty times in a row. The cap only guards against a broken rule.
-    for (int i = 0; next.isValid() && next < today && i < 100000; ++i)
-        next = after(next);
+    if (next.isValid() && next < today) {
+        const int step = qMax(1, interval);
+        if (unit == Weekdays) {
+            next = firstWorkday(today);
+        } else if (unit == Daily || unit == Weekly) {
+            const qint64 stride = unit == Daily ? step : 7LL * step;
+            const qint64 distance = due.daysTo(today);
+            next = representable(due.addDays(((distance + stride - 1) / stride) * stride));
+        } else {
+            const int stride = unit == Monthly ? step : 12 * step;
+            const int months = (today.year() - due.year()) * 12 + today.month() - due.month();
+            const int day = anchorDay ? anchorDay : due.day();
+            QDate month = QDate(due.year(), due.month(), 1).addMonths((months / stride) * stride);
+            next = QDate(month.year(), month.month(), qMin(day, month.daysInMonth()));
+            if (next < today) {
+                month = month.addMonths(stride);
+                next = QDate(month.year(), month.month(), qMin(day, month.daysInMonth()));
+            }
+            next = representable(next);
+        }
+    }
     if (!next.isValid() || (end.isValid() && next > end))
         return {};
     return next;
 }
 
 QDate Repeat::upcoming(const QDate &due, int minutes, const QDateTime &now, const QDate &end) const {
-    const bool gone = minutes >= 0 && QDateTime(now.date(), QTime(minutes / 60, minutes % 60)) <= now;
+    const bool gone =
+        minutes >= 0 && QDateTime(now.date(), QTime(minutes / 60, minutes % 60), now.timeRepresentation()) <= now;
     return upcoming(due, gone ? now.date().addDays(1) : now.date(), end);
 }

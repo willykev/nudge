@@ -1,4 +1,6 @@
 {
+  "%n reminders": {"one": "%n Erinnerung", "other": "%n Erinnerungen"},
+  "%n reminders are coming up": {"one": "%n Erinnerung steht bevor", "other": "%n Erinnerungen stehen bevor"},
   "%n reminders are due": {
     "one": "%n Erinnerung ist fällig",
     "other": "%n Erinnerungen sind fällig"
@@ -11,6 +13,7 @@
   "2 hours before": "2 Stunden vorher",
   "30 minutes before": "30 Minuten vorher",
   "5 minutes before": "5 Minuten vorher",
+  "A repeating reminder needs a date.": "Eine wiederkehrende Erinnerung braucht ein Datum.",
   "Add": "Hinzufügen",
   "All": "Alle",
   "Back to a reminder of its own": "Wieder eine eigene Erinnerung",
@@ -28,10 +31,6 @@
   "Date Created": "Erstellungsdatum",
   "Dates": "Datum",
   "Delete": "Löschen",
-  "Delete %n completed reminders?": {
-    "one": "%n erledigte Erinnerung löschen?",
-    "other": "%n erledigte Erinnerungen löschen?"
-  },
   "Delete completed": "Erledigte löschen",
   "Delete Completed": "Erledigte löschen",
   "Delete List": "Liste löschen",
@@ -76,9 +75,10 @@
   "High": "Hoch",
   "In a Week": "In einer Woche",
   "In an Hour": "In einer Stunde",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "Die Erinnerung wurde in einem anderen Fenster oder durch einen Befehl gelöscht. Die Änderung wurde daher nicht gespeichert.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Die Erinnerung wird mit gelöscht. Mit „Rückgängig“ kommt sie zurück.",
-    "other": "Die %n Erinnerungen werden mit gelöscht. Mit „Rückgängig“ kommen sie zurück."
+    "other": "Die %Ln Erinnerungen werden mit gelöscht. Mit „Rückgängig“ kommen sie zurück."
   },
   "Link": "Link",
   "List": "Liste",
@@ -159,8 +159,9 @@
   "Sorted by %1": "Sortiert nach %1",
   "Tags": "Tags",
   "The desktop did not accept a notification: %1": "Der Desktop hat eine Benachrichtigung nicht angenommen: %1",
+  "The reminder’s list, section, or parent has changed.": "Die Liste, der Abschnitt oder die übergeordnete Erinnerung hat sich geändert.",
   "There are no completed reminders to delete": "Es gibt keine erledigten Erinnerungen zum Löschen",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Diese Liste ist nach %1 sortiert. Drücke S für Manuelle Reihenfolge, um sie neu anzuordnen.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Diese Liste ist nach %1 sortiert. Zum Verschieben die manuelle Reihenfolge wählen.",
   "This sheet": "Diese Übersicht",
   "Time": "Uhrzeit",
   "Title": "Titel",
@@ -170,6 +171,8 @@
   "Type a date": "Datum eingeben",
   "Undo": "Rückgängig",
   "Undo brings them back.": "Mit „Rückgängig“ kommen sie zurück.",
+  "Until %1": "Bis %1",
+  "Untitled reminder": "Erinnerung ohne Titel",
   "Weekdays": "Werktags",
   "Weekly": "Wöchentlich",
   "When": "Wann",

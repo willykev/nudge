@@ -10,6 +10,7 @@
 bool isCliCommand(const QString &word);
 QString cliSummary();
 int runCli(const QStringList &arguments);
+int runCliInDesktopLocale(const QStringList &arguments, const QString &languageFile = {});
 
 // The background service: alerts for reminders while no window is open.
 // `session` is the environment it was started with, before Nudge set its own
@@ -24,7 +25,8 @@ struct WindowLaunch {
     QStringList arguments;
     QProcessEnvironment environment;
 };
-WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun);
+WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun,
+                          qint64 reminderId = 0);
 
 // The window and the background service quit through the event loop on
 // SIGTERM, SIGINT and SIGHUP, except one they were started ignoring.

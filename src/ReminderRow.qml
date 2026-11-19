@@ -49,7 +49,7 @@ Item {
     // A screen reader hears the row as the list's item it is: its title,
     // what it carries, and whether it is the one the keys act on.
     Accessible.role: Accessible.ListItem
-    Accessible.name: title
+    Accessible.name: title || qsTr("Untitled reminder")
     Accessible.description: {
         let said = ""
         for (const part of [dueText, repeatText, tags, listName])
@@ -229,7 +229,7 @@ Item {
                 Text {
                     visible: !row.editing
                     Layout.fillWidth: true
-                    text: row.title
+                    text: row.title || qsTr("Untitled reminder")
                     textFormat: Text.PlainText
                     // Said outright so right-to-left mirroring can turn it around.
                     horizontalAlignment: Text.AlignLeft

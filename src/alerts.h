@@ -29,7 +29,9 @@ public:
 };
 
 // Brings an open Nudge window to the front, and says whether it did.
-bool focusNudgeWindow();
+bool focusNudgeWindow(qint64 pid = 0);
+void registerNudgeWindow(QObject *window);
+bool openExistingNudgeWindow(const QString &database, qint64 id);
 
 // Desktop notifications over D-Bus (org.freedesktop.Notifications).
 class DesktopAlerts : public QObject, public Alerts {
@@ -85,8 +87,7 @@ private:
     // that was due then, the moment its buttons answer for.
     struct Shown {
         qint64 id = 0;
-        QDate due;
-        int dueMinutes = -1;
+        qint64 dueAt = 0;
         QString title, body; // as shown, to show again without buttons
     };
 
@@ -94,4 +95,5 @@ private:
     Alerts *m_alerts;
     QTimer m_timer;
     QHash<quint32, Shown> m_shown;
+    bool m_checking = false;
 };

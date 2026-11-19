@@ -1,6 +1,9 @@
 {
+  "%n reminders": {"one": "%n promemoria", "many": "%n promemoria", "other": "%n promemoria"},
+  "%n reminders are coming up": {"one": "%n promemoria in arrivo", "many": "%n promemoria in arrivo", "other": "%n promemoria in arrivo"},
   "%n reminders are due": {
     "one": "%n promemoria in scadenza",
+    "many": "%n promemoria in scadenza",
     "other": "%n promemoria in scadenza"
   },
   "1 day before": "1 giorno prima",
@@ -11,6 +14,7 @@
   "2 hours before": "2 ore prima",
   "30 minutes before": "30 minuti prima",
   "5 minutes before": "5 minuti prima",
+  "A repeating reminder needs a date.": "Un promemoria ricorrente richiede una data.",
   "Add": "Aggiungi",
   "All": "Tutti",
   "Back to a reminder of its own": "Torna a promemoria indipendente",
@@ -28,16 +32,13 @@
   "Date Created": "Data di creazione",
   "Dates": "Date",
   "Delete": "Elimina",
-  "Delete %n completed reminders?": {
-    "one": "Eliminare %n promemoria completato?",
-    "other": "Eliminare %n promemoria completati?"
-  },
   "Delete completed": "Elimina completati",
   "Delete Completed": "Elimina completati",
   "Delete List": "Elimina lista",
   "Delete “%1”?": "Eliminare “%1”?",
   "Deleted %n completed reminders": {
     "one": "%n promemoria completato eliminato",
+    "many": "%n promemoria completati eliminati",
     "other": "%n promemoria completati eliminati"
   },
   "Deleted “%1”. Undo brings it back.": "“%1” eliminato. Annulla lo ripristina.",
@@ -54,18 +55,22 @@
   "Ends": "Termina",
   "Every %n days": {
     "one": "Ogni %n giorno",
+    "many": "Ogni %n giorni",
     "other": "Ogni %n giorni"
   },
   "Every %n months": {
     "one": "Ogni %n mese",
+    "many": "Ogni %n mesi",
     "other": "Ogni %n mesi"
   },
   "Every %n weeks": {
     "one": "Ogni %n settimana",
+    "many": "Ogni %n settimane",
     "other": "Ogni %n settimane"
   },
   "Every %n years": {
     "one": "Ogni %n anno",
+    "many": "Ogni %n anni",
     "other": "Ogni %n anni"
   },
   "First or last": "Primo o ultimo",
@@ -76,9 +81,11 @@
   "High": "Alta",
   "In a Week": "Tra una settimana",
   "In an Hour": "Tra un’ora",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "Il promemoria è stato eliminato in un’altra finestra o da un comando. La modifica non è stata salvata.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Il suo promemoria viene eliminato con essa. Annulla lo ripristina.",
-    "other": "I suoi %n promemoria vengono eliminati con essa. Annulla li ripristina."
+    "many": "I suoi %Ln promemoria vengono eliminati con essa. Annulla li ripristina.",
+    "other": "I suoi %Ln promemoria vengono eliminati con essa. Annulla li ripristina."
   },
   "Link": "Link",
   "List": "Lista",
@@ -159,8 +166,9 @@
   "Sorted by %1": "Ordinati per %1",
   "Tags": "Tag",
   "The desktop did not accept a notification: %1": "Il desktop non ha accettato una notifica: %1",
+  "The reminder’s list, section, or parent has changed.": "La lista, la sezione o il promemoria principale è cambiato.",
   "There are no completed reminders to delete": "Non ci sono promemoria completati da eliminare",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Questa lista è ordinata per %1. Premi S per Ordine manuale e riordinarla.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "L’elenco è ordinato per %1. Scegli l’ordine manuale per riordinarlo.",
   "This sheet": "Questa scheda",
   "Time": "Ora",
   "Title": "Titolo",
@@ -170,6 +178,8 @@
   "Type a date": "Digita una data",
   "Undo": "Annulla",
   "Undo brings them back.": "Annulla li ripristina.",
+  "Until %1": "Fino al %1",
+  "Untitled reminder": "Promemoria senza titolo",
   "Weekdays": "Giorni feriali",
   "Weekly": "Ogni settimana",
   "When": "Quando",

@@ -17,6 +17,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <cstdio>
+#include <memory>
 
 #include "alerts.h"
 #include "backend.h"
@@ -55,8 +56,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         // "at 5:30" is the same time typed here as in the window.
-        Translator::useDesktopLocale();
-        return runCli(app.arguments());
+        return runCliInDesktopLocale(app.arguments());
     }
 
     // The background service shows notifications in the desktop's language,
@@ -88,6 +88,7 @@ int main(int argc, char *argv[]) {
     args.addHelpOption();
     args.addPositionalArgument("open", "Open the window", "open");
     args.addOption({"view", "Start on a view: today, scheduled, all, flagged, completed", "view"});
+    args.addOption({"reminder", "Show a reminder by its id", "id"});
     args.addOption({"details", "Start with the details pane open"});
     args.addOption({"help-overlay", "Start with the shortcuts showing"});
     args.addOption({"show", "Start with a dialog open: list, date, move, menu, delete", "dialog"});
@@ -105,7 +106,12 @@ int main(int argc, char *argv[]) {
     // Reminders are one thing to look at, so launching Nudge again brings
     // the window that is open to the front rather than opening a second.
     const bool screenshot = args.isSet("screenshot");
-    if (!screenshot && !args.isSet("new-window") && focusNudgeWindow())
+    const qint64 reminder = args.value("reminder").toLongLong();
+    if (args.isSet("reminder") && reminder <= 0) {
+        fprintf(stderr, "nudge: --reminder needs a positive reminder id\n");
+        return 1;
+    }
+    if (!screenshot && !args.isSet("new-window") && openExistingNudgeWindow(Store::defaultPath(), reminder))
         return 0;
 
     // The plainest style, as Hype uses: every control is drawn by Nudge's
@@ -117,7 +123,19 @@ int main(int argc, char *argv[]) {
     // Omarchy's own, with that theme as the current one.
     QTemporaryDir stand;
     QString showing;
+    QString database;
     if (screenshot) {
+        const QString source = Store::defaultPath();
+        if (!stand.isValid() || Store::isDatabaseFile(source, args.value("screenshot"))) {
+            fprintf(stderr, "nudge: choose a picture path separate from the reminders database\n");
+            return 1;
+        }
+        database = stand.filePath("picture.db");
+        const QString error = Store::copyForPicture(source, database);
+        if (!error.isEmpty()) {
+            fprintf(stderr, "nudge: could not copy reminders for the picture: %s\n", qPrintable(error));
+            return 1;
+        }
         showing = "/nonexistent";
         if (args.isSet("theme")) {
             const QString asked = args.value("theme");
@@ -144,10 +162,13 @@ int main(int argc, char *argv[]) {
     };
     adoptFont();
     QObject::connect(&look, &Look::changed, &app, adoptFont);
-    Store store;
-    store.watch();
-    DesktopAlerts alerts(false);
+    Store store(database);
+    std::unique_ptr<DesktopAlerts> alerts;
     Backend backend(&store);
+    if (screenshot)
+        backend.setService({}, {});
+    else
+        store.watch();
     if (screenshot && args.isSet("now")) {
         const QDateTime now = QDateTime::fromString(args.value("now"), Qt::ISODate);
         if (!now.isValid()) {
@@ -158,8 +179,10 @@ int main(int argc, char *argv[]) {
     }
     if (args.isSet("view"))
         backend.setViewKey(args.value("view"));
-    if (!screenshot)
-        backend.attachAlerts(&alerts);
+    if (!screenshot) {
+        alerts = std::make_unique<DesktopAlerts>(false);
+        backend.attachAlerts(alerts.get());
+    }
 
     QQmlApplicationEngine engine;
     QObject::connect(&translator, &Translator::changed, &backend, &Backend::retranslate);
@@ -192,6 +215,11 @@ int main(int argc, char *argv[]) {
         QMetaObject::invokeMethod(window, "show", Q_ARG(QVariant, args.value("show")));
     if (screenshot && args.isSet("type"))
         QMetaObject::invokeMethod(window, "type", Q_ARG(QVariant, args.value("type")));
+    if (!screenshot) {
+        registerNudgeWindow(&backend);
+        if (reminder)
+            backend.revealReminder(store.path(), reminder);
+    }
     if (screenshot) {
         QTimer::singleShot(900, &app, [&] {
             auto *quick = qobject_cast<QQuickWindow *>(window);

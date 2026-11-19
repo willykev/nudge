@@ -1,6 +1,9 @@
 {
+  "%n reminders": {"one": "%n lembrete", "many": "%n lembretes", "other": "%n lembretes"},
+  "%n reminders are coming up": {"one": "%n lembrete está chegando", "many": "%n lembretes estão chegando", "other": "%n lembretes estão chegando"},
   "%n reminders are due": {
     "one": "%n lembrete vence",
+    "many": "%n lembretes vencem",
     "other": "%n lembretes vencem"
   },
   "1 day before": "1 dia antes",
@@ -11,6 +14,7 @@
   "2 hours before": "2 horas antes",
   "30 minutes before": "30 minutos antes",
   "5 minutes before": "5 minutos antes",
+  "A repeating reminder needs a date.": "Um lembrete recorrente precisa de uma data.",
   "Add": "Adicionar",
   "All": "Todos",
   "Back to a reminder of its own": "Voltar a ser um lembrete independente",
@@ -28,16 +32,13 @@
   "Date Created": "Data de criação",
   "Dates": "Datas",
   "Delete": "Excluir",
-  "Delete %n completed reminders?": {
-    "one": "Excluir %n lembrete concluído?",
-    "other": "Excluir %n lembretes concluídos?"
-  },
   "Delete completed": "Excluir concluídos",
   "Delete Completed": "Excluir concluídos",
   "Delete List": "Excluir lista",
   "Delete “%1”?": "Excluir “%1”?",
   "Deleted %n completed reminders": {
     "one": "%n lembrete concluído excluído",
+    "many": "%n lembretes concluídos excluídos",
     "other": "%n lembretes concluídos excluídos"
   },
   "Deleted “%1”. Undo brings it back.": "“%1” excluído. Desfazer o restaura.",
@@ -54,18 +55,22 @@
   "Ends": "Termina",
   "Every %n days": {
     "one": "A cada %n dia",
+    "many": "A cada %n dias",
     "other": "A cada %n dias"
   },
   "Every %n months": {
     "one": "A cada %n mês",
+    "many": "A cada %n meses",
     "other": "A cada %n meses"
   },
   "Every %n weeks": {
     "one": "A cada %n semana",
+    "many": "A cada %n semanas",
     "other": "A cada %n semanas"
   },
   "Every %n years": {
     "one": "A cada %n ano",
+    "many": "A cada %n anos",
     "other": "A cada %n anos"
   },
   "First or last": "Primeiro ou último",
@@ -76,9 +81,11 @@
   "High": "Alta",
   "In a Week": "Em uma semana",
   "In an Hour": "Em uma hora",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "It was deleted in another window or by a command, so the change was not saved.": "O lembrete foi excluído em outra janela ou por um comando. A alteração não foi salva.",
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Seu lembrete é excluído junto com ela. Desfazer o restaura.",
-    "other": "Seus %n lembretes são excluídos junto com ela. Desfazer os restaura."
+    "many": "Seus %Ln lembretes são excluídos junto com ela. Desfazer os restaura.",
+    "other": "Seus %Ln lembretes são excluídos junto com ela. Desfazer os restaura."
   },
   "Link": "Link",
   "List": "Lista",
@@ -159,8 +166,9 @@
   "Sorted by %1": "Ordenado por %1",
   "Tags": "Etiquetas",
   "The desktop did not accept a notification: %1": "A área de trabalho não aceitou uma notificação: %1",
+  "The reminder’s list, section, or parent has changed.": "A lista, a seção ou o lembrete principal foi alterado.",
   "There are no completed reminders to delete": "Não há lembretes concluídos para excluir",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Esta lista está ordenada por %1. Pressione S para Ordem manual e reorganizá-la.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Esta lista está ordenada por %1. Escolha Ordem manual para reorganizá-la.",
   "This sheet": "Esta folha",
   "Time": "Hora",
   "Title": "Título",
@@ -170,6 +178,8 @@
   "Type a date": "Digitar uma data",
   "Undo": "Desfazer",
   "Undo brings them back.": "Desfazer os restaura.",
+  "Until %1": "Até %1",
+  "Untitled reminder": "Lembrete sem título",
   "Weekdays": "Dias úteis",
   "Weekly": "Semanalmente",
   "When": "Quando",

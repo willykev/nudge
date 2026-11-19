@@ -195,7 +195,7 @@ ApplicationWindow {
             return
         }
         ask.confirm(qsTr("Delete “%1”?").arg(info.name),
-                    qsTr("Its %n reminders are deleted with it. Undo brings them back.", "", info.total),
+                    qsTr("Its %Ln reminders are deleted with it. Undo brings them back.", "", info.total),
                     qsTr("Delete"), () => backend.removeList(id))
     }
     // What is asked about is what is deleted: the reminders counted as the
@@ -206,7 +206,7 @@ ApplicationWindow {
             say(qsTr("There are no completed reminders to delete"))
             return
         }
-        ask.confirm(qsTr("Delete %n completed reminders?", "", ids.length), qsTr("Undo brings them back."),
+        ask.confirm(qsTr("Delete completed"), qsTr("Undo brings them back."),
                     qsTr("Delete"), () => backend.clearCompleted(ids))
     }
     function newSection() {
@@ -252,6 +252,12 @@ ApplicationWindow {
             detailsVisible = false
     }
 
+    function showRevealedReminder() {
+        listView.forceLayout()
+        if (backend.selectedRow >= 0)
+            listView.positionViewAtIndex(backend.selectedRow, ListView.Contain)
+    }
+
     Component.onCompleted: listView.forceActiveFocus()
     // Closing the window mid-word keeps the word, and settles a new reminder
     // the details were filling in.
@@ -268,6 +274,7 @@ ApplicationWindow {
             win.raise()
             win.requestActivate()
         }
+        function onRevealSelection() { Qt.callLater(win.showRevealedReminder) }
         function onSelectedRowChanged() {
             if (backend.selectedRow >= 0)
                 listView.positionViewAtIndex(backend.selectedRow, ListView.Contain)
@@ -516,9 +523,12 @@ ApplicationWindow {
                         reuseItems: true
                         cacheBuffer: 480
                         boundsBehavior: Flickable.StopAtBounds
+                        // A pooled row has no keyboard input. Keep the
+                        // inline editor in view until its title is settled.
+                        interactive: !win.editingId
                         topMargin: 8
                         bottomMargin: 20
-                        ScrollBar.vertical: ScrollHandle {}
+                        ScrollBar.vertical: ScrollHandle { interactive: !win.editingId }
 
                         delegate: DelegateChooser {
                             role: "kind"

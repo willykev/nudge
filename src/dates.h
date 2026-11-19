@@ -16,6 +16,9 @@ struct QuickEntry {
     QString repeat;
     QStringList tags;
     int priority = 0;
+    QDate repeatEnd;
+    int weekday = 0; // explicitly named by a weekly rule
+    bool lateFold = false; // the second time the clock shows this minute
 };
 
 namespace Dates {
@@ -26,6 +29,7 @@ QDate parseDate(const QString &text, const QDate &today); // invalid when not un
 int parseTime(const QString &text);                       // minutes after midnight, or -1
 
 QString formatDay(const QDate &date, const QDate &today); // Today, Friday, Fri, Nov 20
+QString formatEditableDate(const QDate &date);
 QString formatTime(int minutes);
 QString formatDue(const QDate &date, int minutes, const QDate &today);
 QString formatMonth(const QDate &date);

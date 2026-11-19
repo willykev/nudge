@@ -5,25 +5,20 @@
 #include <QCoreApplication>
 #include <QHash>
 #include <QRegularExpression>
+#include <QTimeZone>
 #include <QVector>
+#include <algorithm>
 
 namespace {
 
-int weekday(const QString &word, bool *brief = nullptr) {
+int weekday(const QString &word) {
     static const QHash<QString, int> full{{"monday", 1}, {"tuesday", 2},  {"wednesday", 3}, {"thursday", 4},
                                           {"friday", 5}, {"saturday", 6}, {"sunday", 7}};
     static const QHash<QString, int> shortened{{"mon", 1},  {"tue", 2},   {"tues", 2}, {"wed", 3}, {"thu", 4},
                                                {"thur", 4}, {"thurs", 4}, {"fri", 5},  {"sat", 6}, {"sun", 7}};
-    if (brief)
-        *brief = false;
     if (const int day = full.value(word))
         return day;
-    if (const int day = shortened.value(word)) {
-        if (brief)
-            *brief = true;
-        return day;
-    }
-    return 0;
+    return shortened.value(word);
 }
 
 int month(const QString &word) {
@@ -44,7 +39,7 @@ int dayNumber(const QString &word) {
 }
 
 int year(const QString &word) {
-    static const QRegularExpression pattern("^(20\\d{2})$");
+    static const QRegularExpression pattern("^(\\d{4})$");
     const auto match = pattern.match(word);
     return match.hasMatch() ? match.captured(1).toInt() : 0;
 }
@@ -52,9 +47,32 @@ int year(const QString &word) {
 // The first day from today on with this month and day. The 29th of February
 // waits for a leap year, which is never more than eight years off.
 QDate nextDate(int month, int day, const QDate &today) {
-    for (int year = today.year(); year <= today.year() + 8; ++year)
+    for (int year = today.year(); year <= qMin(9999, today.year() + 8); ++year)
         if (const QDate found(year, month, day); found.isValid() && found >= today)
             return found;
+    return {};
+}
+
+QString editablePattern(const QLocale &locale) {
+    static const QRegularExpression shortYear("(?<!y)yy(?!y)");
+    return locale.dateFormat(QLocale::ShortFormat).replace(shortYear, "yyyy");
+}
+
+QDate numericDate(const QString &text, const QDate &today, const QLocale &locale) {
+    const QString written = locale.dateFormat(QLocale::ShortFormat);
+    const bool dayFirst = written.indexOf('d') < written.indexOf('M') || written.startsWith('y');
+    const QStringList patterns = dayFirst
+        ? QStringList{"d/M/yyyy", "d.M.yyyy", "d-M-yyyy", "d/M/yy", "d.M.yy", "d/M", "d.M", "d.M."}
+        : QStringList{"M/d/yyyy", "M-d-yyyy", "M/d/yy", "M/d"};
+    for (const QString &pattern : patterns) {
+        const bool dated = pattern.contains('y');
+        // Use a leap year for yearless dates and a separate pivot for yy.
+        const QString input = dated ? text : text + "/2000";
+        const QString format = dated ? pattern : pattern + "/yyyy";
+        const QDate found = locale.toDate(input, format, 1970);
+        if (found.isValid())
+            return dated ? found : nextDate(found.month(), found.day(), today);
+    }
     return {};
 }
 
@@ -99,11 +117,14 @@ Time timeAt(const QStringList &words, int index) {
     const int minute = match.captured(3).toInt();
     QString half = match.captured(4);
     int used = 1;
+    const bool onTheHour = !hasMinutes && (words.value(index + 1) == "o'clock" || words.value(index + 1) == "o’clock");
+    if (onTheHour)
+        ++used;
     if (half.isEmpty()) {
-        const QString next = words.value(index + 1);
+        const QString next = words.value(index + used);
         if (next == "am" || next == "pm" || next == "a.m." || next == "p.m.") {
             half = next;
-            used = 2;
+            ++used;
         }
     }
     // "5.30" is more often a price than a time, unless it says am or pm.
@@ -129,7 +150,7 @@ Time timeAt(const QStringList &words, int index) {
     const bool guessed = hour >= 1 && hour <= 12 && !match.captured(1).startsWith('0');
     if (guessed && hour <= 7 && (!hasMinutes || twelveHourClock()))
         hour += 12;
-    return {hour * 60 + minute, !hasMinutes, used, guessed};
+    return {hour * 60 + minute, !hasMinutes && !onTheHour, used, guessed};
 }
 
 struct Parsed {
@@ -143,7 +164,8 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     QStringList words;
     for (const QString &token : tokens) {
         QString word = token.toLower();
-        while (word.size() > 1 && (word.endsWith(',') || word.endsWith(';')))
+        while (word.size() > 1 && (word.endsWith(',') || word.endsWith(';') || word.endsWith('?') ||
+                                   (word.endsWith('.') && !word.endsWith("a.m.") && !word.endsWith("p.m."))))
             word.chop(1);
         words << word;
     }
@@ -154,9 +176,12 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     QDate date;
     int minutes = -1;
     bool guessed = false; // the time's morning or afternoon was a guess
+    bool lateFold = false;
     Repeat repeat;
+    QDate repeatEnd;
     int repeatDay = 0; // "every friday"
     bool tonight = false;
+    int dayPart = -1;
     QStringList tags;
     int priority = 0;
 
@@ -172,8 +197,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         if (from > 0 && !used[from - 1] && (lenient ? beforeWeekday : leading).contains(words[from - 1]))
             used[from - 1] = true;
     };
-    // A short weekday ("sun", "wed") only counts where little else can follow:
-    // "Buy sun cream" is not about Sunday.
+    // Bare weekdays and named times count where little else can follow.
     auto closes = [&](int index) {
         if (index >= size)
             return true;
@@ -183,6 +207,31 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         const Time time = timeAt(words, index);
         return time.minutes >= 0 && !time.bare;
     };
+    auto qualifier = [](const QString &word) {
+        static const QStringList parts{"morning", "afternoon", "evening", "night"};
+        return parts.indexOf(word);
+    };
+    auto article = [&](int index) {
+        const QString word = words.value(index - 1);
+        return word == "the" || word == "a" || word == "an";
+    };
+    auto endpoint = [&](int index) {
+        const QString word = words.value(index);
+        return weekday(word) || word == "tomorrow" || word == "today" ||
+               QDate::fromString(word, Qt::ISODate).isValid() || timeAt(words, index).minutes >= 0;
+    };
+    // Keep a range or an ordinal weekday rule together if it cannot be
+    // scheduled as written. Pulling out one date changes its meaning.
+    static const QRegularExpression ordinal("^(?:first|second|third|fourth|fifth|last|\\d+(?:st|nd|rd|th))$");
+    bool keepSchedule = false;
+    for (int i = 1; !lenient && i + 1 < size; ++i) {
+        const QString &word = words[i];
+        if (((word == "to" || word == "through" || word == "or") && endpoint(i - 1) && endpoint(i + 1)) ||
+            (words[i - 1] == "every" && ordinal.match(word).hasMatch() && weekday(words[i + 1]))) {
+            keepSchedule = true;
+            break;
+        }
+    }
 
     for (int i = 0; i < size; ++i) {
         if (used[i])
@@ -192,10 +241,11 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
 
         if (word.size() > 1 && word.startsWith('#')) {
             QString tag = tokens[i].mid(1);
-            while (!tag.isEmpty() && !tag.back().isLetterOrNumber())
+            while (!tag.isEmpty() && !tag.back().isLetterOrNumber() && !tag.endsWith('+') && !tag.endsWith('#'))
                 tag.chop(1);
-            if (!tag.isEmpty()) {
-                tags << tag;
+            if (std::any_of(tag.cbegin(), tag.cend(), [](QChar ch) { return ch.isLetterOrNumber(); })) {
+                if (!tags.contains(tag, Qt::CaseInsensitive))
+                    tags << tag;
                 used[i] = true;
                 continue;
             }
@@ -204,6 +254,20 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             priority = qMax(priority, int(word.size()));
             used[i] = true;
             continue;
+        }
+        if (keepSchedule)
+            continue;
+
+        if (word == "until" && repeat.repeats()) {
+            for (int n = qMin(4, size - i - 1); n > 0; --n) {
+                repeatEnd = Dates::parseDate(tokens.mid(i + 1, n).join(' '), today);
+                if (repeatEnd.isValid()) {
+                    take(i, n + 1, {});
+                    break;
+                }
+            }
+            if (repeatEnd.isValid())
+                continue;
         }
 
         if (word == "every" && i + 1 < size) {
@@ -244,12 +308,14 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
 
         if (word == "today") {
             date = today;
-            take(i, 1, beforeDay);
+            dayPart = qualifier(next);
+            take(i, dayPart >= 0 ? 2 : 1, beforeDay);
             continue;
         }
         if (word == "tomorrow" || word == "tmrw" || word == "tmr") {
             date = today.addDays(1);
-            take(i, 1, beforeDay);
+            dayPart = qualifier(next);
+            take(i, dayPart >= 0 ? 2 : 1, beforeDay);
             continue;
         }
         if (word == "tonight" || (word == "this" && next == "evening")) {
@@ -303,6 +369,9 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             if (moment.isValid()) {
                 date = moment.date();
                 minutes = moment.time().hour() * 60 + moment.time().minute();
+                const QDateTime first(date, moment.time(), moment.timeRepresentation(),
+                                      QDateTime::TransitionResolution::PreferBefore);
+                lateFold = first.isValid() && first < moment;
                 guessed = false;
             } else if (target.isValid()) {
                 date = target;
@@ -313,11 +382,10 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             }
         }
 
-        bool brief = false;
-        if (const int day = weekday(word, &brief)) {
-            if (!brief || lenient || (i > 0 && beforeWeekday.contains(words[i - 1])) || closes(i + 1)) {
+        if (const int day = weekday(word)) {
+            if (lenient || beforeWeekday.contains(words.value(i - 1)) || (!article(i) && closes(i + 1))) {
                 int ahead = (day - today.dayOfWeek() + 7) % 7;
-                if (ahead == 0)
+                if (ahead == 0 && words.value(i - 1) != "this")
                     ahead = 7;
                 date = today.addDays(ahead);
                 take(i, 1, beforeWeekday);
@@ -337,7 +405,11 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             length = 2;
         }
         if (length) {
-            const int stated = year(words.value(i + 2));
+            int stated = year(words.value(i + 2));
+            // In a title a bare number could be an amount. A comma makes
+            // unusual years explicit, as does typing the date on its own.
+            if (!lenient && !tokens[i + 1].endsWith(',') && (stated < 1900 || stated >= 2200))
+                stated = 0;
             const QDate found = stated ? QDate(stated, monthNumber, day) : nextDate(monthNumber, day, today);
             if (found.isValid()) {
                 date = found;
@@ -353,12 +425,22 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
                 continue;
             }
         }
+        // A fraction or a version number can look like a short date. In a
+        // title, dates written this way need a cue such as "on" or "due".
+        if ((word.contains('/') || word.contains('.')) && (lenient || beforeDate.contains(words.value(i - 1)))) {
+            if (const QDate local = numericDate(word, today, QLocale()); local.isValid()) {
+                date = local;
+                take(i, 1, beforeDate);
+                continue;
+            }
+        }
 
         if (word == "at" && i + 1 < size) {
             const Time time = timeAt(words, i + 1);
             if (time.minutes >= 0) {
                 minutes = time.minutes;
                 guessed = time.guessed;
+                lateFold = false;
                 used[i] = true;
                 for (int k = 0; k < time.used; ++k)
                     used[i + 1 + k] = true;
@@ -366,9 +448,11 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             }
         }
         const Time time = timeAt(words, i);
-        if (time.minutes >= 0 && (!time.bare || lenient)) {
+        const bool clockWord = word == "noon" || word == "midday" || word == "midnight";
+        if (time.minutes >= 0 && (lenient || (!time.bare && (!clockWord || (!article(i) && closes(i + 1)))))) {
             minutes = time.minutes;
             guessed = time.guessed;
+            lateFold = false;
             for (int k = 0; k < time.used; ++k)
                 used[i + k] = true;
             continue;
@@ -376,6 +460,18 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     }
 
     const int nowMinutes = now.time().hour() * 60 + now.time().minute();
+    if (dayPart >= 0) {
+        if (minutes < 0) {
+            static const int hours[]{9, 15, 18, 21};
+            minutes = hours[dayPart] * 60;
+        } else if (guessed) {
+            const int hour = minutes / 60 % 12;
+            const bool nextMorning = dayPart == 3 && hour <= 4;
+            if (nextMorning)
+                date = date.addDays(1);
+            minutes = (hour + (dayPart == 0 || nextMorning ? 0 : 12)) * 60 + minutes % 60;
+        }
+    }
     // Tonight without a time is eight o'clock or, once eight has gone by, the
     // next hour on the clock: after eleven that is midnight, moved on below.
     if (tonight && minutes < 0)
@@ -397,9 +493,10 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             date = date.addDays(1);
     }
     // "Every friday at 9" starts today on a Friday, unless nine has gone by.
-    if (repeatDay && !date.isValid()) {
-        date = today.addDays((repeatDay - today.dayOfWeek() + 7) % 7);
-        if (date == today && minutes >= 0 && minutes <= nowMinutes)
+    if (repeatDay) {
+        const bool implicit = !date.isValid();
+        date = Repeat::onWeekday(date.isValid() ? date : today, repeatDay);
+        if (implicit && date == today && minutes >= 0 && minutes <= nowMinutes)
             date = date.addDays(7);
     }
     if (minutes >= 0 && !date.isValid()) {
@@ -409,8 +506,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     if (repeat.repeats() && !date.isValid())
         date = today;
     if (repeat.unit == Repeat::Weekdays)
-        while (date.dayOfWeek() > 5)
-            date = date.addDays(1);
+        date = Repeat::firstWorkday(date);
     if (repeat.unit == Repeat::Monthly || repeat.unit == Repeat::Yearly)
         repeat.anchorDay = date.day();
 
@@ -426,6 +522,9 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     parsed.entry.repeat = repeat.toString();
     parsed.entry.tags = tags;
     parsed.entry.priority = priority;
+    parsed.entry.repeatEnd = repeatEnd;
+    parsed.entry.weekday = repeatDay;
+    parsed.entry.lateFold = lateFold;
     return parsed;
 }
 
@@ -436,7 +535,7 @@ QString translate(const char *text) { return QCoreApplication::translate("Dates"
 QuickEntry Dates::parseQuick(const QString &text, const QDateTime &now) {
     const Parsed parsed = parse(text, now, false);
     // A line that is nothing but a date is a title, not a reminder without one.
-    if (parsed.entry.title.isEmpty()) {
+    if (parsed.entry.title.isEmpty() || (parsed.entry.repeatEnd.isValid() && parsed.entry.repeatEnd < parsed.entry.due)) {
         QuickEntry plain;
         plain.title = text.simplified();
         return plain;
@@ -448,6 +547,27 @@ QDate Dates::parseDate(const QString &text, const QDate &today) {
     const QString phrase = text.simplified();
     if (phrase.isEmpty())
         return {};
+    const QLocale locale;
+    if (phrase.compare(translate(QT_TRANSLATE_NOOP("Dates", "Today")), Qt::CaseInsensitive) == 0)
+        return today;
+    if (phrase.compare(translate(QT_TRANSLATE_NOOP("Dates", "Tomorrow")), Qt::CaseInsensitive) == 0)
+        return today.addDays(1);
+    if (phrase.compare(translate(QT_TRANSLATE_NOOP("Dates", "Yesterday")), Qt::CaseInsensitive) == 0 ||
+        phrase.compare("yesterday", Qt::CaseInsensitive) == 0)
+        return today.addDays(-1);
+    if (const QDate exact = locale.toDate(phrase, editablePattern(locale), 1970); exact.isValid())
+        return exact;
+    if (const QDate exact = locale.toDate(phrase, dayPattern(locale, true), 1970); exact.isValid())
+        return exact;
+    const QString thisYear = phrase + ' ' + locale.toString(today, "yyyy");
+    if (const QDate exact = locale.toDate(thisYear, dayPattern(locale, false) + " yyyy", 1970); exact.isValid())
+        return exact;
+    for (int day = 1; day <= 7; ++day) {
+        if (phrase.compare(locale.dayName(day), Qt::CaseInsensitive) == 0) {
+            const QDate next = Repeat::onWeekday(today, day);
+            return next == today ? next.addDays(7) : next;
+        }
+    }
     const Parsed parsed = parse(phrase, QDateTime(today, QTime(0, 0)), true);
     if (parsed.entry.due.isValid() && parsed.leftover == 0 && parsed.entry.minutes < 0)
         return parsed.entry.due;
@@ -462,36 +582,12 @@ QDate Dates::parseDate(const QString &text, const QDate &today) {
         return found;
     }
 
-    const QLocale locale;
     for (const auto format : {QLocale::ShortFormat, QLocale::LongFormat}) {
-        QDate found = locale.toDate(phrase, format);
-        if (found.isValid()) {
-            // Two-digit years read as the 1900s.
-            if (found.year() < 1970)
-                found = found.addYears(100);
-            return found;
-        }
-    }
-    const QString written = locale.dateFormat(QLocale::ShortFormat);
-    const bool dayFirst = written.indexOf('d') < written.indexOf('M');
-    const QStringList patterns = dayFirst
-        ? QStringList{"d/M/yyyy", "d.M.yyyy", "d-M-yyyy", "d/M/yy", "d.M.yy", "d/M", "d.M", "d.M."}
-        : QStringList{"M/d/yyyy", "M-d-yyyy", "M/d/yy", "M/d"};
-    for (const QString &pattern : patterns) {
-        // Without a year Qt reads the day in 1900, which had no 29th of
-        // February; 2000 had one.
-        const bool dated = pattern.contains('y');
-        QDate found = dated ? QDate::fromString(phrase, pattern) : QDate::fromString(phrase, pattern, 2000);
-        if (!found.isValid())
-            continue;
-        if (!dated)
-            found = nextDate(found.month(), found.day(), today);
-        else if (found.year() < 1970)
-            found = found.addYears(100);
+        const QDate found = locale.toDate(phrase, format, 1970);
         if (found.isValid())
             return found;
     }
-    return {};
+    return numericDate(phrase, today, locale);
 }
 
 int Dates::parseTime(const QString &text) {
@@ -545,6 +641,10 @@ QString Dates::formatDay(const QDate &date, const QDate &today) {
     return locale.toString(date, dayPattern(locale, date.year() != today.year()));
 }
 
+QString Dates::formatEditableDate(const QDate &date) {
+    const QLocale locale;
+    return date.isValid() ? locale.toString(date, editablePattern(locale)) : QString();
+}
 QString Dates::formatTime(int minutes) {
     if (minutes < 0)
         return {};

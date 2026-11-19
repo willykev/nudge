@@ -38,6 +38,7 @@ struct ViewOptions {
     bool showCompleted = false;
     QSet<qint64> lingering; // completed a moment ago and still on screen
     QSet<qint64> collapsed; // parents whose subtasks are folded away
+    qint64 draftId = 0; // only this window's inline editor shows its draft
 };
 
 QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &options);

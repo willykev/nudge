@@ -18,6 +18,8 @@ struct Repeat {
     static Repeat parse(const QString &rule);
     QString toString() const;
     bool repeats() const { return unit != Never; }
+    static QDate onWeekday(const QDate &date, int day);
+    static QDate firstWorkday(const QDate &date);
 
     // The occurrence that follows `date`.
     QDate after(const QDate &date) const;

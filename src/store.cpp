@@ -3,24 +3,55 @@
 #include "recurrence.h"
 
 #include <QCoreApplication>
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QSqlError>
 #include <QStandardPaths>
+#include <QThread>
 #include <QVariant>
 #include <algorithm>
+#include <atomic>
+#include <type_traits>
+#include <tuple>
+#include <utility>
+#include <sys/stat.h>
 
 namespace {
 QString isoDate(const QDate &date) { return date.isValid() ? date.toString(Qt::ISODate) : QString(); }
 QDate fromIso(const QString &text) { return text.isEmpty() ? QDate() : QDate::fromString(text, Qt::ISODate); }
 QVariant idOrNull(qint64 id) { return id ? QVariant(id) : QVariant(QMetaType::fromType<qint64>()); }
+QString normalPath() { return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/nudge/nudge.db"; }
+
+QString physicalPath(const QString &path) {
+    QFileInfo file(path);
+    QSet<QString> visited;
+    while (file.isSymLink() && !visited.contains(file.absoluteFilePath())) {
+        visited.insert(file.absoluteFilePath());
+        file.setFile(file.symLinkTarget());
+    }
+    const QString directory = file.dir().canonicalPath();
+    return QDir::cleanPath(directory.isEmpty() ? file.absoluteFilePath() : QDir(directory).filePath(file.fileName()));
+}
+
+bool sameFile(const QString &a, const QString &b) {
+    if (a == b || physicalPath(a) == physicalPath(b))
+        return true;
+    struct stat first{}, second{};
+    return ::stat(QFile::encodeName(a).constData(), &first) == 0 &&
+           ::stat(QFile::encodeName(b).constData(), &second) == 0 &&
+           first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
 
 const char *const reminderColumns =
     "id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
     "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
-    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at";
+    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at, late_fold, early_scheduled_at, draft";
+
+constexpr int busyTimeoutMs = 4000;
 
 Reminder reminderFrom(const QSqlQuery &query) {
     Reminder r;
@@ -49,6 +80,9 @@ Reminder reminderFrom(const QSqlQuery &query) {
     r.alertedEarly = query.value(i++).toLongLong();
     r.snoozeUntil = query.value(i++).toLongLong();
     r.scheduledAt = query.value(i++).toLongLong();
+    r.lateFold = query.value(i++).toBool();
+    r.earlyScheduledAt = query.value(i++).toLongLong();
+    r.draft = query.value(i++).toBool();
     return r;
 }
 
@@ -88,13 +122,18 @@ Reminder rebased(const Reminder &current, const Reminder &before, const Reminder
     TAKE(title);
     TAKE(notes);
     TAKE(url);
-    TAKE2(due, dueMinutes);
+    if (after.due != before.due || after.dueMinutes != before.dueMinutes || after.lateFold != before.lateFold) {
+        merged.due = after.due;
+        merged.dueMinutes = after.dueMinutes;
+        merged.lateFold = after.lateFold;
+    }
     TAKE2(repeat, repeatEnd);
     TAKE(early);
     TAKE(priority);
     TAKE(flagged);
     TAKE(tags);
     TAKE2(completed, completedAt);
+    TAKE(draft);
     TAKE(position);
     TAKE(alertedDue);
     TAKE(alertedEarly);
@@ -122,29 +161,98 @@ Section rebased(const Section &current, const Section &before, const Section &af
 #undef TAKE2
 } // namespace
 
+struct Store::Rows {
+    QSet<qint64> lists, sections, reminders;
+
+    bool isEmpty() const { return lists.isEmpty() && sections.isEmpty() && reminders.isEmpty(); }
+    bool meets(const Rows &other) const {
+        return lists.intersects(other.lists) || sections.intersects(other.sections) ||
+               reminders.intersects(other.reminders);
+    }
+    void add(const Rows &other) {
+        lists.unite(other.lists);
+        sections.unite(other.sections);
+        reminders.unite(other.reminders);
+    }
+    void holdFor(const Reminder &r) {
+        lists.insert(r.listId);
+        if (r.sectionId)
+            sections.insert(r.sectionId);
+        if (r.parentId)
+            reminders.insert(r.parentId);
+    }
+};
+
 bool Reminder::sameContent(const Reminder &other) const {
-    Reminder a = *this, b = other;
-    a.alertedDue = a.alertedEarly = a.snoozeUntil = 0;
-    b.alertedDue = b.alertedEarly = b.snoozeUntil = 0;
-    return a == b;
+    auto fields = [](const Reminder &r) {
+        return std::tie(r.id, r.listId, r.sectionId, r.parentId, r.title, r.notes, r.url, r.due, r.dueMinutes,
+                        r.lateFold, r.repeat, r.repeatEnd, r.early, r.priority, r.flagged, r.tags, r.completed, r.draft,
+                        r.completedAt, r.createdAt, r.modifiedAt, r.scheduledAt, r.earlyScheduledAt, r.position);
+    };
+    return fields(*this) == fields(other);
 }
 
-qint64 Reminder::dueAt() const {
+bool Reminder::hasText() const {
+    return !title.trimmed().isEmpty() || !notes.trimmed().isEmpty() || !url.trimmed().isEmpty();
+}
+
+bool Reminder::hasContent() const {
+    return hasText() || due.isValid() ||
+           !repeat.isEmpty() || early || priority || flagged || !tags.isEmpty() || completed;
+}
+
+qint64 Reminder::dueAt(const QTimeZone &zone) const {
     if (!due.isValid())
         return 0;
     const int minutes = dueMinutes >= 0 ? dueMinutes : allDayAlertMinutes;
-    return QDateTime(due, QTime(minutes / 60, minutes % 60)).toSecsSinceEpoch();
+    const auto resolve = lateFold ? QDateTime::TransitionResolution::PreferAfter
+                                  : QDateTime::TransitionResolution::LegacyBehavior;
+    return QDateTime(due, QTime(minutes / 60, minutes % 60), zone, resolve).toSecsSinceEpoch();
 }
 
 QString Store::defaultPath() {
     const QString override = qEnvironmentVariable("NUDGE_DB");
     if (!override.isEmpty())
         return override;
-    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/nudge/nudge.db";
+    return normalPath();
+}
+
+bool Store::isDatabaseFile(const QString &database, const QString &path) {
+    const QString physical = physicalPath(database);
+    for (const QString &suffix : {QString(), QString("-wal"), QString("-shm"), QString("-journal")})
+        if (sameFile(database + suffix, path) || (database != physical && sameFile(physical + suffix, path)))
+            return true;
+    return false;
+}
+
+QString Store::copyForPicture(const QString &source, const QString &destination) {
+    if (!QFileInfo::exists(source))
+        return {};
+    const QString name = "nudge-picture";
+    QString error;
+    {
+        auto reader = QSqlDatabase::addDatabase("QSQLITE", name);
+        reader.setDatabaseName(source);
+        reader.setConnectOptions("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=4000");
+        if (!reader.open()) {
+            error = reader.lastError().text();
+        } else {
+            QSqlQuery copy(reader);
+            if (!copy.prepare("VACUUM INTO ?")) {
+                error = copy.lastError().text();
+            } else {
+                copy.addBindValue(destination);
+                if (!copy.exec())
+                    error = copy.lastError().text();
+            }
+        }
+    }
+    QSqlDatabase::removeDatabase(name);
+    return error;
 }
 
 Store::Store(const QString &path, QObject *parent) : QObject(parent) {
-    static int connections = 0;
+    static std::atomic_int connections = 0;
     m_connection = QString("nudge-%1").arg(++connections);
     m_path = path.isEmpty() ? defaultPath() : path;
 
@@ -154,8 +262,12 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
         arm();
         reloadIfChanged();
     });
-    connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_reload.start(); });
-    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_reload.start(); });
+    const auto refreshSoon = [this] {
+        if (!m_reload.isActive())
+            m_reload.start();
+    };
+    connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, refreshSoon);
+    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, refreshSoon);
 
     const QString folder = QFileInfo(m_path).absolutePath();
     const bool newFolder = !QFileInfo::exists(folder);
@@ -165,13 +277,13 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
     }
     // What is written down here is the person's own: the folder Nudge makes,
     // or its own one, is theirs alone, and so is the file.
-    if (newFolder || QFileInfo(defaultPath()).absolutePath() == folder)
+    if (newFolder || QFileInfo(normalPath()).absolutePath() == folder)
         QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     keepPrivate();
     m_db = QSqlDatabase::addDatabase("QSQLITE", m_connection);
     m_db.setDatabaseName(m_path);
     // The window, the command line, and the background alerts may all write.
-    m_db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=4000");
+    m_db.setConnectOptions(QString("QSQLITE_BUSY_TIMEOUT=%1").arg(busyTimeoutMs));
     if (!m_db.open()) {
         fail(QString("Could not open %1: %2").arg(m_path, m_db.lastError().text()));
         return;
@@ -180,7 +292,7 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
     const bool ready =
         // Every change is on the disk before it shows as saved: a laptop can
         // lose power, and a reminder that vanished is worse than a millisecond.
-        run("PRAGMA journal_mode=WAL") && run("PRAGMA synchronous=FULL") &&
+        enableWal() && run("PRAGMA synchronous=FULL") &&
         run("CREATE TABLE IF NOT EXISTS lists ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL,"
             "position REAL NOT NULL, sort TEXT NOT NULL DEFAULT 'manual')") &&
@@ -199,12 +311,11 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
             "created_at INTEGER NOT NULL DEFAULT 0, modified_at INTEGER NOT NULL DEFAULT 0,"
             "position REAL NOT NULL DEFAULT 0, alerted_due INTEGER NOT NULL DEFAULT 0,"
             "alerted_early INTEGER NOT NULL DEFAULT 0, snooze_until INTEGER NOT NULL DEFAULT 0,"
-            "scheduled_at INTEGER NOT NULL DEFAULT 0)") &&
+            "scheduled_at INTEGER NOT NULL DEFAULT 0, late_fold INTEGER NOT NULL DEFAULT 0,"
+            "early_scheduled_at INTEGER NOT NULL DEFAULT 0, draft INTEGER NOT NULL DEFAULT 0)") &&
         // Files from Nudge 0.1.3 and earlier: until a reminder is given a
         // moment anew, it was last given one when it was last changed.
-        (hasColumn("reminders", "scheduled_at") ||
-         (run("ALTER TABLE reminders ADD COLUMN scheduled_at INTEGER NOT NULL DEFAULT 0") &&
-          run("UPDATE reminders SET scheduled_at = modified_at"))) &&
+        migrate() &&
         run("CREATE INDEX IF NOT EXISTS reminders_by_list ON reminders (list_id)") &&
         run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)") &&
         // Set only when it differs: any write tells every other process the
@@ -241,6 +352,29 @@ bool Store::run(const QString &sql) {
     return false;
 }
 
+bool Store::enableWal() {
+    const QDeadlineTimer deadline(busyTimeoutMs);
+    for (;;) {
+        QSqlError error;
+        {
+            QSqlQuery query(m_db);
+            if (query.exec("PRAGMA journal_mode=WAL") && query.next())
+                return true;
+            error = query.lastError();
+        }
+        // Two connections opening a new file can both hold a read lock while
+        // asking for the exclusive lock. SQLite skips its busy wait then.
+        constexpr int sqliteBusy = 5;
+        constexpr int sqliteLocked = 6;
+        const int code = error.nativeErrorCode().toInt() & 0xff;
+        if (deadline.hasExpired() || (code != sqliteBusy && code != sqliteLocked)) {
+            fail(error.text());
+            return false;
+        }
+        QThread::msleep(20);
+    }
+}
+
 bool Store::hasColumn(const QString &table, const QString &column) {
     QSqlQuery query(m_db);
     if (!query.exec(QString("PRAGMA table_info(%1)").arg(table)))
@@ -248,6 +382,27 @@ bool Store::hasColumn(const QString &table, const QString &column) {
     while (query.next())
         if (query.value(1).toString() == column)
             return true;
+    return false;
+}
+
+bool Store::migrate() {
+    if (hasColumn("reminders", "scheduled_at") && hasColumn("reminders", "late_fold") &&
+        hasColumn("reminders", "early_scheduled_at") && hasColumn("reminders", "draft"))
+        return true;
+    if (!run("BEGIN IMMEDIATE"))
+        return false;
+    // Another process may have added the column while this one waited.
+    if ((hasColumn("reminders", "scheduled_at") ||
+         (run("ALTER TABLE reminders ADD COLUMN scheduled_at INTEGER NOT NULL DEFAULT 0") &&
+          run("UPDATE reminders SET scheduled_at = modified_at"))) &&
+        (hasColumn("reminders", "late_fold") ||
+         run("ALTER TABLE reminders ADD COLUMN late_fold INTEGER NOT NULL DEFAULT 0")) &&
+        (hasColumn("reminders", "early_scheduled_at") ||
+         run("ALTER TABLE reminders ADD COLUMN early_scheduled_at INTEGER NOT NULL DEFAULT 0")) &&
+        (hasColumn("reminders", "draft") || run("ALTER TABLE reminders ADD COLUMN draft INTEGER NOT NULL DEFAULT 0")) &&
+        run("COMMIT"))
+        return true;
+    m_db.rollback();
     return false;
 }
 
@@ -276,24 +431,25 @@ void Store::prepare() {
     m_putReminder = QSqlQuery(m_db);
     m_putReminder.prepare(
         QString("INSERT OR REPLACE INTO reminders (%1) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .arg(QLatin1String(reminderColumns)));
     m_putList = QSqlQuery(m_db);
     m_putList.prepare("INSERT OR REPLACE INTO lists (id, name, color, position, sort) VALUES (?, ?, ?, ?, ?)");
     m_putSection = QSqlQuery(m_db);
     m_putSection.prepare("INSERT OR REPLACE INTO sections (id, list_id, name, position) VALUES (?, ?, ?, ?)");
     m_setAlerted = QSqlQuery(m_db);
-    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? WHERE id = ?");
+    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? "
+                        "WHERE id = ? AND completed = 0 AND due = ? AND due_minutes = ? AND late_fold = ? AND early = ?");
 }
 
 // Everything is read in one read transaction, so it is one moment of the
 // file, and the version noted is that moment's: a commit landing meanwhile
 // is still news next time. Memory stays as it was when the file cannot be read.
-bool Store::load() {
+bool Store::load(bool locked) {
     QVector<TaskList> lists;
     QVector<Section> sections;
     QHash<qint64, Reminder> reminders;
-    const bool reading = m_db.transaction();
+    const bool reading = locked || m_db.transaction();
     QSqlQuery query(m_db);
     query.setForwardOnly(true);
     bool ok = reading && query.exec("PRAGMA data_version") && query.next();
@@ -319,7 +475,7 @@ bool Store::load() {
     ok = ok && !query.lastError().isValid();
     const QString problem = query.lastError().isValid() ? query.lastError().text() : m_db.lastError().text();
     query.finish();
-    if (reading)
+    if (reading && !locked)
         m_db.commit(); // it only read
     if (!ok) {
         fail(problem);
@@ -343,14 +499,16 @@ void Store::repair() {
     if (parents.isEmpty())
         return;
     m_recording = false;
-    begin();
-    for (const qint64 id : std::as_const(parents)) {
-        Reminder parent = *reminder(id);
-        parent.completed = false;
-        parent.completedAt = 0;
-        put(parent);
+    Tx tx(this, {}, Latest);
+    if (!tx) {
+        m_recording = true;
+        return;
     }
-    commit();
+    for (const qint64 id : std::as_const(parents)) {
+        if (const Reminder *parent = reminder(id); parent && parent->completed)
+            reopen(id);
+    }
+    tx.commit();
     m_recording = true;
 }
 
@@ -420,19 +578,33 @@ double Store::endPosition(qint64 listId) const {
 qint64 Store::defaultListId() {
     if (!m_lists.isEmpty())
         return m_lists.first().id;
+    Tx tx(this, {}, Latest);
+    if (!tx)
+        return 0;
+    if (!m_lists.isEmpty())
+        return m_lists.first().id;
     TaskList list;
     list.name = QCoreApplication::translate("Store", "Reminders");
     list.color = "blue";
     list.position = 1;
-    m_recording = false;
-    const qint64 id = put(list);
-    m_recording = true;
-    return id;
+    // The default list outlives undo of the first reminder.
+    if (!write(list))
+        return 0;
+    apply(list.id, list);
+    m_externalChange = true;
+    // Keep the insert in the rollback journal, without adding it to undo.
+    m_pending.lists.append({list.id, std::nullopt, list});
+    m_pending.lists.last().keepOnUndo = true;
+    return tx.commit() ? list.id : 0;
 }
 
-void Store::begin(const QString &mergeKey) {
+bool Store::Tx::commit() {
+    return std::exchange(m_store, nullptr)->commit();
+}
+
+bool Store::begin(const QString &mergeKey, Snapshot snapshot) {
     if (!m_open)
-        return;
+        return false;
     if (m_depth++ == 0) {
         m_pending = UndoEntry();
         m_pending.mergeKey = mergeKey;
@@ -441,7 +613,15 @@ void Store::begin(const QString &mergeKey) {
         // it is written (see rebase()), and nothing may change it in between.
         if (!run("BEGIN IMMEDIATE"))
             m_broken = true;
+        m_current = !m_broken && dataVersion() == m_dataVersion;
     }
+    if (!m_broken && snapshot == Latest && !m_current) {
+        const auto changed = readChanges(true);
+        m_broken = !changed.has_value();
+        m_current = !m_broken;
+        m_externalChange |= changed.value_or(false);
+    }
+    return !m_broken;
 }
 
 bool Store::commit() {
@@ -449,11 +629,16 @@ bool Store::commit() {
         return false;
     if (--m_depth > 0)
         return !m_broken;
-    if (!finish())
+    const bool external = std::exchange(m_externalChange, false);
+    bool undoChanged = std::exchange(m_undoChanged, false);
+    if (!finish()) {
+        if (undoChanged)
+            emit this->undoChanged();
         return false;
-    if (m_pending.isEmpty())
-        return true;
-    if (m_recording) {
+    }
+    m_pending.lists.removeIf([](const auto &delta) { return delta.keepOnUndo; });
+    const bool written = !m_pending.isEmpty();
+    if (written && m_recording) {
         const bool merge = !m_pending.mergeKey.isEmpty() && !m_undo.isEmpty() &&
                            m_undo.last().mergeKey == m_pending.mergeKey;
         if (merge) {
@@ -466,10 +651,13 @@ bool Store::commit() {
                 m_undo.removeFirst();
         }
         m_redo.clear();
-        emit undoChanged();
+        undoChanged = true;
     }
     m_pending = UndoEntry();
-    emit changed();
+    if (undoChanged)
+        emit this->undoChanged();
+    if (written || external)
+        emit changed();
     return true;
 }
 
@@ -533,6 +721,9 @@ bool Store::write(Reminder &r) {
     query.bindValue(i++, r.alertedEarly);
     query.bindValue(i++, r.snoozeUntil);
     query.bindValue(i++, r.scheduledAt);
+    query.bindValue(i++, r.lateFold);
+    query.bindValue(i++, r.earlyScheduledAt);
+    query.bindValue(i++, r.draft);
     if (!query.exec()) {
         fail(query.lastError().text());
         m_broken = true;
@@ -633,24 +824,40 @@ template <typename T>
 bool Store::rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*fetch)(qint64)) {
     if (m_broken)
         return false;
-    if (!before)
+    if (!row.id)
         return true;
-    const std::optional<T> current = (this->*fetch)(row.id);
+    const std::optional<T> current = m_current ? before : (this->*fetch)(row.id);
     if (m_broken)
         return false;
-    if (!current) {
-        fail("It was deleted in another window or by a command, so the change was not saved.");
+    if (!before || !current) {
+        fail(tr("It was deleted in another window or by a command, so the change was not saved."));
         m_broken = true;
         return false;
     }
     if (*current != *before) {
+        // Once the merged row is in memory, a later reload cannot tell
+        // which part came from another writer. Retire older undo steps now.
+        Rows touched, held;
+        if constexpr (std::is_same_v<T, Reminder>) {
+            if (!current->sameContent(*before)) {
+                touched.reminders.insert(row.id);
+                held.holdFor(*current);
+            }
+        } else if constexpr (std::is_same_v<T, TaskList>) {
+            touched.lists.insert(row.id);
+        } else {
+            touched.sections.insert(row.id);
+            held.lists.insert(current->listId);
+        }
+        if (!touched.isEmpty())
+            forget(touched, held, {});
         row = rebased(*current, *before, row);
         before = current;
     }
     return true;
 }
 
-qint64 Store::put(Reminder r) {
+qint64 Store::put(Reminder r, bool keepFold) {
     if (!m_open)
         return 0;
     std::optional<Reminder> before;
@@ -662,14 +869,48 @@ qint64 Store::put(Reminder r) {
     begin();
     if (!rebase(r, before, &Store::fetchReminder))
         return commit() ? r.id : 0;
+    if (!r.title.trimmed().isEmpty())
+        r.draft = false;
+    const QDate requestedDate = r.due;
+    if (r.repeat == "weekdays" && (!before || r.due != before->due || r.repeat != before->repeat))
+        r.due = Repeat::firstWorkday(r.due);
+    if (!r.due.isValid() || r.dueMinutes < 0 || r.due != requestedDate ||
+        (before && !keepFold && (r.due != before->due || r.dueMinutes != before->dueMinutes)))
+        r.lateFold = false;
+    if (!r.due.isValid() && !r.repeat.isEmpty() && (!before || before->due.isValid() || before->repeat != r.repeat)) {
+        fail(tr("A repeating reminder needs a date."));
+        m_broken = true;
+        return commit() ? r.id : 0;
+    }
+    const bool newHome = !before || before->listId != r.listId || before->sectionId != r.sectionId ||
+                         before->parentId != r.parentId;
+    if (newHome) {
+        const bool hasList = m_current ? list(r.listId) != nullptr : fetchList(r.listId).has_value();
+        const auto folder = r.sectionId ? (m_current && section(r.sectionId)
+                                               ? std::optional(*section(r.sectionId)) : fetchSection(r.sectionId))
+                                        : std::optional<Section>();
+        const auto parent = r.parentId ? (m_current && reminder(r.parentId)
+                                             ? std::optional(*reminder(r.parentId)) : fetchReminder(r.parentId))
+                                      : std::optional<Reminder>();
+        if (!hasList || (r.sectionId && (!folder || folder->listId != r.listId)) ||
+            (r.parentId && (!parent || parent->listId != r.listId || parent->parentId || r.parentId == r.id))) {
+            if (!m_broken)
+                fail(tr("The reminder’s list, section, or parent has changed."));
+            m_broken = true;
+            return commit() ? r.id : 0;
+        }
+    }
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     if (!r.createdAt)
         r.createdAt = now;
     r.modifiedAt = now;
     // A new date or time is a new moment to alert at, given it now.
-    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes;
-    if (moved || before->early != r.early)
+    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes ||
+                       before->lateFold != r.lateFold;
+    if (moved)
         r.scheduledAt = now;
+    if (moved || before->early != r.early)
+        r.earlyScheduledAt = now;
     if (before && moved)
         r.alertedDue = r.alertedEarly = r.snoozeUntil = 0;
     else if (before && before->early != r.early)
@@ -715,7 +956,14 @@ qint64 Store::put(Section section) {
     if (before && *before == section)
         return section.id;
     begin();
-    if (rebase(section, before, &Store::fetchSection) && write(section)) {
+    if (rebase(section, before, &Store::fetchSection) &&
+        (!before || before->listId != section.listId) &&
+        !(m_current ? list(section.listId) != nullptr : fetchList(section.listId).has_value())) {
+        if (!m_broken)
+            fail(tr("The reminder’s list, section, or parent has changed."));
+        m_broken = true;
+    }
+    if (write(section)) {
         apply(section.id, std::optional<Section>(section));
         m_pending.sections.append({section.id, before, section});
     }
@@ -731,30 +979,91 @@ void Store::eraseReminder(qint64 id) {
 }
 
 void Store::removeReminder(qint64 id) {
-    if (!m_open || !reminder(id))
+    Tx tx(this, {}, Latest);
+    if (!tx || !reminder(id))
         return;
-    begin();
     for (qint64 child : childrenOf(id))
         eraseReminder(child);
     eraseReminder(id);
-    commit();
 }
 
-void Store::removeReminders(const QVector<qint64> &ids) {
-    if (!m_open)
+qsizetype Store::removeReminders(const QVector<qint64> &ids) {
+    Tx tx(this, {}, Latest);
+    if (!tx)
+        return 0;
+    QSet<qint64> removing(ids.cbegin(), ids.cend());
+    for (const Reminder &r : std::as_const(m_reminders)) {
+        if (removing.contains(r.id))
+            continue;
+        // A child outside the selection keeps its ancestors attached.
+        for (qint64 parent = r.parentId; parent && removing.remove(parent);) {
+            const Reminder *row = reminder(parent);
+            parent = row ? row->parentId : 0;
+        }
+    }
+    qsizetype count = 0;
+    for (qint64 id : ids) {
+        if (removing.remove(id) && reminder(id)) {
+            eraseReminder(id);
+            ++count;
+        }
+    }
+    return tx.commit() ? count : 0;
+}
+
+void Store::removeEmptyDraft(qint64 id) {
+    Tx tx(this, {}, Latest);
+    const Reminder *r = tx ? reminder(id) : nullptr;
+    if (!r || !r->draft || r->hasText() || !childrenOf(id).isEmpty())
         return;
-    begin();
-    for (qint64 id : ids)
-        eraseReminder(id);
-    commit();
+    const QScopedValueRollback recording(m_recording, false);
+    eraseReminder(id);
+    if (tx.commit()) {
+        Rows gone;
+        gone.reminders.insert(id);
+        forget(gone, {}, gone);
+    }
+}
+
+void Store::cleanUpDrafts(qint64 olderThan) {
+    // Check again under the lock in case another window has filled one in.
+    auto oldDraft = [olderThan](const Reminder &r) {
+        return r.modifiedAt < olderThan && (r.draft || !r.hasContent());
+    };
+    if (std::none_of(m_reminders.cbegin(), m_reminders.cend(), oldDraft))
+        return;
+    Tx tx(this, {}, Latest);
+    if (!tx)
+        return;
+    QVector<qint64> blank, drafts;
+    for (const Reminder &r : std::as_const(m_reminders)) {
+        if (!oldDraft(r))
+            continue;
+        if (!r.hasText())
+            blank.append(r.id);
+        if (r.draft)
+            drafts.append(r.id);
+    }
+    const QScopedValueRollback recording(m_recording, false);
+    bool changed = removeReminders(blank) > 0;
+    // Keep drafts with notes, a link, or a subtask that still needs them.
+    for (qint64 id : drafts) {
+        if (const Reminder *r = reminder(id)) {
+            Reminder recovered = *r;
+            recovered.draft = false;
+            changed |= put(recovered) != 0;
+        }
+    }
+    if (tx.commit() && changed)
+        clearUndo();
 }
 
 void Store::removeList(qint64 id) {
-    const TaskList *existing = list(id);
-    if (!m_open || !existing)
+    Tx tx(this, {}, Latest);
+    const TaskList *existing = tx ? list(id) : nullptr;
+    if (!existing)
         return;
     const TaskList removed = *existing; // the vector it points into is about to change
-    begin();
     QVector<qint64> doomed;
     for (const auto &r : m_reminders)
         if (r.listId == id)
@@ -772,15 +1081,14 @@ void Store::removeList(qint64 id) {
         m_pending.lists.append({id, removed, std::nullopt});
         apply(id, std::optional<TaskList>());
     }
-    commit();
 }
 
 void Store::removeSection(qint64 id) {
-    const Section *existing = section(id);
-    if (!m_open || !existing)
+    Tx tx(this, {}, Latest);
+    const Section *existing = tx ? section(id) : nullptr;
+    if (!existing)
         return;
     const Section removed = *existing;
-    begin();
     QVector<Reminder> loose;
     for (const auto &r : m_reminders)
         if (r.sectionId == id)
@@ -793,63 +1101,108 @@ void Store::removeSection(qint64 id) {
         m_pending.sections.append({id, removed, std::nullopt});
         apply(id, std::optional<Section>());
     }
-    commit();
 }
 
-QDate Store::complete(qint64 id, const QDateTime &now) {
+QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
+    if (completed)
+        *completed = false;
     const Reminder *existing = reminder(id);
-    if (!m_open || !existing || existing->completed)
+    if (!m_open || !existing || existing->completed || existing->draft)
+        return {};
+    const Reminder offered = *existing;
+    Tx tx(this, {}, Latest);
+    existing = tx ? reminder(id) : nullptr;
+    if (!existing || existing->completed || existing->draft || existing->due != offered.due ||
+        existing->dueMinutes != offered.dueMinutes || existing->lateFold != offered.lateFold)
         return {};
     Reminder r = *existing;
     const qint64 seconds = now.toSecsSinceEpoch();
-    const Repeat rule = Repeat::parse(r.repeat);
-    const QDate next =
-        rule.repeats() && r.due.isValid() ? rule.upcoming(r.due, r.dueMinutes, now, r.repeatEnd) : QDate();
+    auto following = [&now](const Reminder &row) {
+        return Repeat::parse(row.repeat).upcoming(row.due, row.dueMinutes, now, row.repeatEnd);
+    };
+    auto advance = [this, seconds](Reminder row, const QDate &date) {
+        if (date.isValid()) {
+            Reminder history = row;
+            history.id = 0;
+            // This occurrence stays in Completed when the parent repeats.
+            history.parentId = 0;
+            history.repeat.clear();
+            history.repeatEnd = {};
+            history.completed = true;
+            history.completedAt = seconds;
+            put(history);
+            row.due = date;
+        } else {
+            row.completed = true;
+            row.completedAt = seconds;
+        }
+        put(row);
+    };
+    const QDate next = following(r);
 
-    begin();
     const QVector<qint64> children = childrenOf(id);
+    advance(r, next);
     if (next.isValid()) {
-        // What was done stays on record; the reminder itself moves on, with
-        // its subtasks to do again.
-        Reminder done = r;
-        done.id = 0;
-        done.repeat.clear();
-        done.repeatEnd = QDate();
-        done.completed = true;
-        done.completedAt = seconds;
-        put(done);
-        r.due = next;
-        put(r);
+        // Before history was detached, an occurrence could still be under
+        // this parent. It shares the series' title and creation timestamp.
+        QHash<QPair<QString, qint64>, QDate> liveRepeats;
+        for (qint64 childId : children) {
+            const Reminder &child = *reminder(childId);
+            if (!child.repeat.isEmpty())
+                liveRepeats.insert({child.title, child.createdAt}, child.due);
+        }
         for (qint64 childId : children) {
             Reminder child = *reminder(childId);
+            if (!child.completed || !child.repeat.isEmpty())
+                continue;
+            const QDate live = liveRepeats.value({child.title, child.createdAt});
+            if (live.isValid() && child.due.isValid() && child.due < live)
+                continue;
             child.completed = false;
             child.completedAt = 0;
             put(child);
         }
     } else {
-        r.completed = true;
-        r.completedAt = seconds;
-        put(r);
         for (qint64 childId : children) {
             Reminder child = *reminder(childId);
             if (child.completed)
                 continue;
-            child.completed = true;
-            child.completedAt = seconds;
-            put(child);
+            const QDate childNext = following(child);
+            if (childNext.isValid()) {
+                // The child still has something to do after its parent ends.
+                // Keep its completed occurrence with the parent.
+                Reminder history = child;
+                history.id = 0;
+                history.repeat.clear();
+                history.repeatEnd = {};
+                history.completed = true;
+                history.completedAt = seconds;
+                put(history);
+                child.parentId = 0;
+                child.position = r.position;
+                child.due = childNext;
+                put(child);
+            } else {
+                advance(child, {});
+            }
         }
     }
-    return commit() ? next : QDate();
+    const bool saved = tx.commit();
+    if (completed)
+        *completed = saved;
+    return saved ? next : QDate();
 }
 
-void Store::reopen(qint64 id) {
-    const Reminder *existing = reminder(id);
-    if (!m_open || !existing || !existing->completed)
-        return;
+bool Store::reopen(qint64 id) {
+    Tx tx(this, {}, Latest);
+    const Reminder *existing = tx ? reminder(id) : nullptr;
+    if (!existing || !existing->completed)
+        return false;
     Reminder r = *existing;
     r.completed = false;
     r.completedAt = 0;
-    put(r); // which reopens its parent too: an open subtask means that is not finished either
+    const bool saved = put(r); // an open subtask reopens its parent too
+    return tx.commit() && saved;
 }
 
 void Store::apply(qint64 id, const std::optional<TaskList> &state) {
@@ -890,18 +1243,19 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     }
     Reminder r = *state;
     r.modifiedAt = QDateTime::currentSecsSinceEpoch();
-    if (current && current->due == r.due && current->dueMinutes == r.dueMinutes) {
+    const bool sameMoment = current && current->due == r.due && current->dueMinutes == r.dueMinutes &&
+                            current->lateFold == r.lateFold;
+    if (sameMoment) {
         r.alertedDue = current->alertedDue;
-        r.alertedEarly = current->alertedEarly;
+        if (current->early == r.early)
+            r.alertedEarly = current->alertedEarly;
         r.snoozeUntil = current->snoozeUntil;
     } else if (r.snoozeUntil <= r.modifiedAt) {
         r.snoozeUntil = 0;
     }
     // Given back another moment, it was given it just now.
-    if (current && current->due == r.due && current->dueMinutes == r.dueMinutes && current->early == r.early)
-        r.scheduledAt = current->scheduledAt;
-    else
-        r.scheduledAt = r.modifiedAt;
+    r.scheduledAt = sameMoment ? current->scheduledSince() : r.modifiedAt;
+    r.earlyScheduledAt = sameMoment && current->early == r.early ? current->earlySince() : r.modifiedAt;
     if (!write(r))
         return;
     m_reminders.insert(id, r);
@@ -1042,6 +1396,10 @@ void Store::setAlerted(qint64 id, qint64 due, qint64 early, qint64 snoozeUntil) 
     m_setAlerted.bindValue(1, early);
     m_setAlerted.bindValue(2, snoozeUntil);
     m_setAlerted.bindValue(3, id);
+    m_setAlerted.bindValue(4, found->due.isValid() ? isoDate(found->due) : QStringLiteral(""));
+    m_setAlerted.bindValue(5, found->dueMinutes);
+    m_setAlerted.bindValue(6, found->lateFold);
+    m_setAlerted.bindValue(7, found->early);
     if (!m_setAlerted.exec())
         fail(m_setAlerted.lastError().text());
 }
@@ -1082,48 +1440,40 @@ void Store::arm() {
             m_watcher.addPath(path);
 }
 
-struct Store::Rows {
-    QSet<qint64> lists, sections, reminders;
-
-    bool isEmpty() const { return lists.isEmpty() && sections.isEmpty() && reminders.isEmpty(); }
-    bool meets(const Rows &other) const {
-        return lists.intersects(other.lists) || sections.intersects(other.sections) ||
-               reminders.intersects(other.reminders);
-    }
-    void add(const Rows &other) {
-        lists.unite(other.lists);
-        sections.unite(other.sections);
-        reminders.unite(other.reminders);
-    }
-    // What a reminder sits in: its list, and its section and parent if any.
-    void holdFor(const Reminder &r) {
-        lists.insert(r.listId);
-        if (r.sectionId)
-            sections.insert(r.sectionId);
-        if (r.parentId)
-            reminders.insert(r.parentId);
-    }
-};
-
 bool Store::reloadIfChanged() {
-    if (!m_open || m_depth > 0 || dataVersion() == m_dataVersion)
+    if (!m_open || m_depth > 0)
+        return false;
+    if (!readChanges().value_or(false))
+        return false;
+    emit changed();
+    return true;
+}
+
+std::optional<bool> Store::readChanges(bool locked) {
+    if (!locked && dataVersion() == m_dataVersion)
         return false;
     const auto lists = m_lists;
     const auto sections = m_sections;
     const auto reminders = m_reminders;
-    if (!load())
-        return false;
+    if (!load(locked))
+        return std::nullopt;
 
     // What another process changed, which of those rows it deleted, and
     // what its reminders and sections now sit in.
     Rows touched, gone, held;
     auto compare = [](const auto &before, const auto &after, QSet<qint64> &changed, QSet<qint64> &deleted) {
+        if (before == after)
+            return;
+        QHash<qint64, const typename std::decay_t<decltype(before)>::value_type *> old;
         for (const auto &row : before)
-            if (std::none_of(after.cbegin(), after.cend(), [&row](const auto &now) { return now.id == row.id; }))
-                deleted.insert(row.id);
-        for (const auto &row : after)
-            if (std::find(before.cbegin(), before.cend(), row) == before.cend())
+            old.insert(row.id, &row);
+        for (const auto &row : after) {
+            const auto *was = old.take(row.id);
+            if (!was || *was != row)
                 changed.insert(row.id);
+        }
+        for (auto it = old.cbegin(); it != old.cend(); ++it)
+            deleted.insert(it.key());
         changed.unite(deleted);
     };
     compare(lists, m_lists, touched.lists, gone.lists);
@@ -1148,7 +1498,6 @@ bool Store::reloadIfChanged() {
     if (touched.isEmpty())
         return false;
     forget(touched, held, gone);
-    emit changed();
     return true;
 }
 
@@ -1196,6 +1545,8 @@ void Store::forget(const Rows &touched, const Rows &held, const Rows &gone) {
     // An older step is on top now; the next edit starts a step of its own.
     if (topGone)
         sealUndo();
-    if (dropped)
+    if (dropped && m_depth)
+        m_undoChanged = true;
+    else if (dropped)
         emit undoChanged();
 }

@@ -152,6 +152,9 @@ public:
     Q_INVOKABLE void dismissBackgroundAsk();
     void retranslate(); // the language changed: names made here need making again
 
+public slots:
+    Q_SCRIPTABLE bool revealReminder(const QString &database, qlonglong id);
+
 signals:
     void viewChanged();
     void countsChanged();
@@ -167,6 +170,7 @@ signals:
     void problemChanged();
     void backgroundChanged();
     void notice(const QString &text); // something worth a passing word
+    void revealSelection();          // scroll to the reminder from an alert
     void raise();                     // an alert was clicked: come to the front
 
 private slots:
