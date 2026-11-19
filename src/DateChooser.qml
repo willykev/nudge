@@ -2,31 +2,52 @@ import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 
-// A month to click a day in. Typing a date in the field is the keyboard's way.
+// A month to click a day in or move through with the keyboard.
 Popup {
     id: chooser
     property var app
     property var reminderId: 0
     property string selectedIso: ""
+    property date cursor: new Date()
     // Reads the language, so the month and day names follow a switch.
     readonly property var language: { translator.language; return Qt.locale() }
 
     function iso(year, month, day) {
-        return year + "-" + String(month + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0")
+        return String(year).padStart(4, "0") + "-" + String(month + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0")
     }
     function openFor(id, current) {
         reminderId = id
         selectedIso = current || ""
-        const shown = current ? new Date(current + "T12:00:00") : new Date()
-        grid.year = shown.getFullYear()
-        grid.month = shown.getMonth()
+        showDate(current ? new Date(current + "T12:00:00") : new Date())
         open()
     }
-    function turn(delta) {
-        const next = new Date(grid.year, grid.month + delta, 1)
-        grid.year = next.getFullYear()
-        grid.month = next.getMonth()
+    function showDate(shown) {
+        if (shown.getFullYear() < 1 || shown.getFullYear() > 9999)
+            return
+        cursor = shown
+        grid.year = shown.getFullYear()
+        grid.month = shown.getMonth()
     }
+    function turn(delta) {
+        const next = new Date(cursor)
+        const day = next.getDate()
+        next.setDate(1)
+        next.setMonth(next.getMonth() + delta + 1)
+        next.setDate(0)
+        next.setDate(Math.min(day, next.getDate()))
+        showDate(next)
+    }
+    function step(days) {
+        const next = new Date(cursor)
+        next.setDate(next.getDate() + days)
+        showDate(next)
+    }
+    function choose(day) {
+        backend.setDateIso(reminderId, day)
+        close()
+    }
+    readonly property string cursorIso: iso(cursor.getFullYear(), cursor.getMonth(), cursor.getDate())
+    onOpened: grid.forceActiveFocus()
 
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -88,11 +109,27 @@ Popup {
             id: grid
             Layout.fillWidth: true
             locale: chooser.language
+            Keys.onPressed: event => {
+                const forward = Qt.application.layoutDirection === Qt.RightToLeft ? -1 : 1
+                switch (event.key) {
+                case Qt.Key_Left: chooser.step(-forward); break
+                case Qt.Key_Right: chooser.step(forward); break
+                case Qt.Key_Up: chooser.step(-7); break
+                case Qt.Key_Down: chooser.step(7); break
+                case Qt.Key_PageUp: chooser.turn(-1); break
+                case Qt.Key_PageDown: chooser.turn(1); break
+                case Qt.Key_Return:
+                case Qt.Key_Enter: chooser.choose(chooser.cursorIso); break
+                default: return
+                }
+                event.accepted = true
+            }
             delegate: Item {
                 id: cell
                 required property var model
                 readonly property string iso: chooser.iso(model.year, model.month, model.day)
                 readonly property bool picked: iso === chooser.selectedIso
+                readonly property bool atCursor: grid.activeFocus && iso === chooser.cursorIso
                 implicitWidth: 36
                 implicitHeight: 30
                 // Heard as the whole date, and chosen the way a click chooses it.
@@ -100,11 +137,7 @@ Popup {
                 Accessible.name: cell.model.date.toLocaleDateString(chooser.language, Locale.LongFormat)
                 Accessible.checkable: true
                 Accessible.checked: cell.picked
-                Accessible.onPressAction: cell.choose()
-                function choose() {
-                    backend.setDateIso(chooser.reminderId, cell.iso)
-                    chooser.close()
-                }
+                Accessible.onPressAction: chooser.choose(cell.iso)
 
                 Rectangle {
                     anchors.centerIn: parent
@@ -114,8 +147,8 @@ Popup {
                     // The day chosen is drawn as the cursor is everywhere
                     // else; today wears a hairline.
                     color: cell.picked ? chooser.app.cursorFill : cellHover.hovered ? chooser.app.ui.controlFill : "transparent"
-                    border.width: cell.picked || cell.model.today ? 1 : 0
-                    border.color: cell.picked ? chooser.app.accent : chooser.app.cursorBorder
+                    border.width: cell.picked || cell.model.today || cell.atCursor ? 1 : 0
+                    border.color: cell.picked || cell.atCursor ? chooser.app.accent : chooser.app.cursorBorder
                 }
                 Text {
                     anchors.centerIn: parent
@@ -126,7 +159,7 @@ Popup {
                     font.pixelSize: chooser.app.fsBody
                 }
                 HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: cell.choose() }
+                TapHandler { onTapped: chooser.choose(cell.iso) }
             }
         }
     }

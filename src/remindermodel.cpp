@@ -130,15 +130,20 @@ QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &
     auto shown = [&](const Reminder &r) {
         return !r.completed || options.showCompleted || options.lingering.contains(r.id);
     };
+    auto belongs = [&](const Reminder &r) {
+        return r.id == options.draftId || (!r.draft && r.hasContent());
+    };
 
     if (view.isTree()) {
         // One pass sorts every reminder under its list or its parent.
         QHash<qint64, Items> top, children;
         for (const Reminder &r : store.reminders()) {
+            if (!belongs(r))
+                continue;
             if (view.kind == View::List && r.listId != view.listId)
                 continue;
             const Reminder *parent = r.parentId ? store.reminder(r.parentId) : nullptr;
-            if (parent && parent->listId == r.listId)
+            if (parent && parent->listId == r.listId && belongs(*parent))
                 children[r.parentId].append(&r);
             else
                 top[r.listId].append(&r);
@@ -199,6 +204,8 @@ QVector<Row> buildRows(const Store &store, const View &view, const ViewOptions &
     Items items;
     const QStringList terms = view.text.split(' ', Qt::SkipEmptyParts);
     for (const Reminder &r : store.reminders()) {
+        if (!belongs(r))
+            continue;
         const bool lingering = options.lingering.contains(r.id);
         bool include = false;
         switch (view.kind) {
@@ -424,6 +431,15 @@ void ReminderModel::show(const QVector<Row> &next, bool reset) {
     for (const Row &row : next)
         nextKeys.insert(row.key);
     if (reset || next.isEmpty() || nextKeys.size() != next.size()) {
+        replace();
+        return;
+    }
+    qsizetype shared = 0;
+    for (const Row &row : std::as_const(m_rows))
+        shared += nextKeys.contains(row.key);
+    // Small changes keep their animations. A large set of interleaved
+    // insertions or removals would shift the row vector over and over.
+    if (next.size() + m_rows.size() - 2 * shared > 128) {
         replace();
         return;
     }

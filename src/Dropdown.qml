@@ -9,6 +9,16 @@ ComboBox {
     // Clicked open, it lets go of the keyboard once its list closes, so the
     // keys meant for elsewhere do not change it unseen.
     signal letGo()
+    // A field can follow a saved value even when retranslation replaces the
+    // model and the control temporarily chooses its first option.
+    property int selectedIndex: -2
+    function followSelection() {
+        if (selectedIndex >= -1)
+            currentIndex = selectedIndex
+    }
+    onSelectedIndexChanged: followSelection()
+    onModelChanged: Qt.callLater(followSelection)
+    Component.onCompleted: followSelection()
 
     font.family: look.fontFamily
     font.pixelSize: look.fontSize

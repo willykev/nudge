@@ -206,15 +206,16 @@ Rectangle {
                 spacing: 6
                 Dropdown {
                     id: repeatBox
+                    objectName: "repeatRule"
                     Layout.fillWidth: true
                     model: [qsTr("Never"), qsTr("Daily"), qsTr("Weekdays"), qsTr("Weekly"), qsTr("Monthly"), qsTr("Yearly")]
-                    currentIndex: Math.max(0, pane.repeatUnits.indexOf(pane.item.repeatUnit))
+                    selectedIndex: Math.max(0, pane.repeatUnits.indexOf(pane.item.repeatUnit))
                     onActivated: index => backend.setRepeat(pane.loadedId, pane.repeatUnits[index], every.value)
                     onLetGo: app.focusList()
                 }
                 Stepper {
                     id: every
-                    visible: repeatBox.currentIndex > 0 && repeatBox.currentIndex !== 2
+                    visible: repeatBox.selectedIndex > 0 && repeatBox.selectedIndex !== 2
                     from: 1
                     to: 999 // as far as a repeat goes, so no interval is cut down to fit
                     value: pane.item.repeatInterval || 1
@@ -242,7 +243,8 @@ Rectangle {
             Caption { visible: endField.visible; text: qsTr("Ends") }
             InputField {
                 id: endField
-                visible: repeatBox.currentIndex > 0
+                objectName: "repeatEnd"
+                visible: repeatBox.selectedIndex > 0
                 Layout.fillWidth: true
                 value: pane.item.repeatEnd || ""
                 save: text => backend.setRepeatEnd(pane.loadedId, text)
@@ -255,7 +257,7 @@ Rectangle {
                 model: [qsTr("None"), qsTr("5 minutes before"), qsTr("15 minutes before"), qsTr("30 minutes before"),
                         qsTr("1 hour before"), qsTr("2 hours before"), qsTr("1 day before"), qsTr("2 days before"),
                         qsTr("1 week before")]
-                currentIndex: Math.max(0, pane.earlyMinutes.indexOf(pane.item.early))
+                selectedIndex: Math.max(0, pane.earlyMinutes.indexOf(pane.item.early))
                 onActivated: index => backend.setEarly(pane.loadedId, pane.earlyMinutes[index])
                 onLetGo: app.focusList()
             }
@@ -265,7 +267,7 @@ Rectangle {
                 Layout.fillWidth: true
                 model: backend.lists
                 textRole: "name"
-                currentIndex: backend.lists.findIndex(list => list.id === pane.item.listId)
+                selectedIndex: backend.lists.findIndex(list => list.id === pane.item.listId)
                 onActivated: index => backend.moveToList(pane.loadedId, backend.lists[index].id)
                 onLetGo: app.focusList()
             }
@@ -275,9 +277,10 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: 12
                 Dropdown {
+                    objectName: "reminderPriority"
                     Layout.fillWidth: true
                     model: [qsTr("None"), qsTr("Low"), qsTr("Medium"), qsTr("High")]
-                    currentIndex: pane.item.priority || 0
+                    selectedIndex: pane.item.priority || 0
                     onActivated: index => backend.setPriority(pane.loadedId, index)
                     onLetGo: app.focusList()
                 }

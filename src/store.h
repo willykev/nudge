@@ -52,14 +52,14 @@ struct Reminder {
     bool flagged = false;
     QStringList tags;
     bool completed = false;
+    bool draft = false; // still being written in the window that started it
     qint64 completedAt = 0; // seconds since the epoch, like the two below
     qint64 createdAt = 0;
     qint64 modifiedAt = 0;
-    // When it was last given the moment it alerts at (its date, time, or
-    // early alert), which other edits leave alone: a moment that had already
-    // gone by then is not announced. 0 in a row written by Nudge 0.1.3 or
-    // earlier, which only had modifiedAt.
+    // The due moment and early lead can be set independently. A moment that
+    // was already past when it was assigned is left quiet.
     qint64 scheduledAt = 0;
+    qint64 earlyScheduledAt = 0;
     double position = 0;
     // Alert bookkeeping: the moments already announced, and a snooze.
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
@@ -69,6 +69,7 @@ struct Reminder {
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
     qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
+    qint64 earlySince() const { return earlyScheduledAt ? earlyScheduledAt : scheduledSince(); }
 };
 
 // Every list, section, and reminder, held in memory and written through to
@@ -182,6 +183,7 @@ private:
     struct Rows; // by table
 
     bool run(const QString &sql);
+    bool enableWal();
     void fail(const QString &message);
     void prepare();
     bool load(bool locked = false);

@@ -152,6 +152,9 @@ public:
     Q_INVOKABLE void dismissBackgroundAsk();
     void retranslate(); // the language changed: names made here need making again
 
+public slots:
+    Q_SCRIPTABLE bool revealReminder(const QString &database, qlonglong id);
+
 signals:
     void viewChanged();
     void countsChanged();

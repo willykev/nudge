@@ -195,7 +195,7 @@ ApplicationWindow {
             return
         }
         ask.confirm(qsTr("Delete “%1”?").arg(info.name),
-                    qsTr("Its %n reminders are deleted with it. Undo brings them back.", "", info.total),
+                    qsTr("Its %Ln reminders are deleted with it. Undo brings them back.", "", info.total),
                     qsTr("Delete"), () => backend.removeList(id))
     }
     // What is asked about is what is deleted: the reminders counted as the
@@ -516,9 +516,12 @@ ApplicationWindow {
                         reuseItems: true
                         cacheBuffer: 480
                         boundsBehavior: Flickable.StopAtBounds
+                        // A pooled row has no keyboard input. Keep the
+                        // inline editor in view until its title is settled.
+                        interactive: !win.editingId
                         topMargin: 8
                         bottomMargin: 20
-                        ScrollBar.vertical: ScrollHandle {}
+                        ScrollBar.vertical: ScrollHandle { interactive: !win.editingId }
 
                         delegate: DelegateChooser {
                             role: "kind"

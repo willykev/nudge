@@ -3,6 +3,9 @@
 #include "dates.h"
 #include "recurrence.h"
 
+#include <QCoreApplication>
+#include <QFileInfo>
+
 #include <QColor>
 #include <QDBusConnection>
 #include <QDesktopServices>
@@ -146,6 +149,7 @@ void Backend::refresh(bool reset) {
     options.showCompleted = m_showCompleted;
     options.lingering = m_lingering;
     options.collapsed = m_collapsed;
+    options.draftId = m_draftId;
 
     const int row = m_model->rowOf(m_selectedId);
     m_model->setContext(options.now, !m_view.isTree());
@@ -172,7 +176,7 @@ void Backend::refresh(bool reset) {
     int open = 0;
     for (const Row &shown : m_model->rows()) {
         const Reminder *r = shown.heading ? nullptr : m_store->reminder(shown.id);
-        open += r && !r->completed;
+        open += r && !r->completed && !r->draft;
     }
     if (open != m_openCount) {
         m_openCount = open;
@@ -215,7 +219,7 @@ void Backend::updateSidebar() {
     QHash<qint64, int> perList;
     QMap<QString, QMap<QString, int>> tags; // by lowercase name: each way it is written, and how often
     for (const Reminder &r : m_store->reminders()) {
-        if (r.completed)
+        if (r.completed || r.draft || !r.hasContent())
             continue;
         ++open;
         ++perList[r.listId];
@@ -451,13 +455,28 @@ void Backend::stepView(int delta) {
 }
 
 void Backend::reveal(qint64 id) {
+    m_store->reloadIfChanged();
     if (const Reminder *r = m_store->reminder(id)) {
+        const Reminder target = *r;
+        if (m_collapsed.remove(target.parentId))
+            refresh();
         if (m_model->rowOf(id) < 0)
-            setViewKey(r->completed ? QStringLiteral("completed") : "list:" + QString::number(r->listId));
+            setViewKey(target.completed ? QStringLiteral("completed") : "list:" + QString::number(target.listId));
         setSelectedId(id);
     }
     emit raise();
-    focusNudgeWindow();
+    focusNudgeWindow(QCoreApplication::applicationPid());
+}
+
+bool Backend::revealReminder(const QString &database, qlonglong id) {
+    const QString here = QFileInfo(m_store->path()).canonicalFilePath();
+    if (id < 0 || here.isEmpty() || QFileInfo(database).canonicalFilePath() != here)
+        return false;
+    m_store->reloadIfChanged();
+    if (id && !m_store->reminder(id))
+        return false;
+    reveal(id);
+    return true;
 }
 
 QVariantMap Backend::selected() const {
@@ -554,6 +573,7 @@ qint64 Backend::addReminder() {
 
     const QDate today = now().date();
     Reminder r;
+    r.draft = true;
     switch (m_view.kind) {
     case View::List: r.listId = m_view.listId; break;
     case View::Today:
@@ -679,7 +699,13 @@ void Backend::settleDraft() {
     const Reminder *r = m_store->reminder(id);
     if (!r)
         return;
-    if (!r->title.isEmpty() || !r->notes.trimmed().isEmpty()) {
+    if (!r->title.isEmpty() || !r->notes.trimmed().isEmpty() || !r->url.isEmpty()) {
+        if (r->draft) {
+            Store::Tx tx(m_store, m_draftKey);
+            Reminder saved = *r;
+            saved.draft = false;
+            m_store->put(saved);
+        }
         m_store->sealUndo();
         return;
     }
@@ -888,7 +914,7 @@ void Backend::moveReminder(qint64 id, int delta) {
         return;
     }
     if (list->sort != "manual") {
-        emit notice(tr("This list is sorted by %1. Press S for Manual Order to rearrange it.").arg(sortName(list->sort)));
+        emit notice(tr("This list is sorted by %1. Choose Manual Order to rearrange it.").arg(sortName(list->sort)));
         return;
     }
     const Reminder r = *found;

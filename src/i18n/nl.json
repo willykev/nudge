@@ -1,4 +1,6 @@
 {
+  "%n reminders": {"one": "%n herinnering", "other": "%n herinneringen"},
+  "%n reminders are coming up": {"one": "%n herinnering komt eraan", "other": "%n herinneringen komen eraan"},
   "%n reminders are due": {
     "one": "%n herinnering vervalt",
     "other": "%n herinneringen vervallen"
@@ -74,9 +76,9 @@
   "In a Week": "Over een week",
   "In an Hour": "Over een uur",
   "It was deleted in another window or by a command, so the change was not saved.": "De herinnering is in een ander venster of met een opdracht verwijderd. De wijziging is niet opgeslagen.",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "De herinnering wordt mee verwijderd. Met Ongedaan maken komt die terug.",
-    "other": "De %n herinneringen worden mee verwijderd. Met Ongedaan maken komen ze terug."
+    "other": "De %Ln herinneringen worden mee verwijderd. Met Ongedaan maken komen ze terug."
   },
   "Link": "Link",
   "List": "Lijst",
@@ -159,7 +161,7 @@
   "The desktop did not accept a notification: %1": "Het bureaublad accepteerde een melding niet: %1",
   "The reminder’s list, section, or parent has changed.": "De lijst, sectie of bovenliggende herinnering is gewijzigd.",
   "There are no completed reminders to delete": "Er zijn geen voltooide herinneringen om te verwijderen",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Deze lijst is gesorteerd op %1. Druk op S voor Handmatige volgorde om te herschikken.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Deze lijst is gesorteerd op %1. Kies Handmatige volgorde om haar opnieuw te rangschikken.",
   "This sheet": "Dit overzicht",
   "Time": "Tijd",
   "Title": "Titel",

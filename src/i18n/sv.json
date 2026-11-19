@@ -1,4 +1,6 @@
 {
+  "%n reminders": {"one": "%n påminnelse", "other": "%n påminnelser"},
+  "%n reminders are coming up": {"one": "%n påminnelse kommer snart", "other": "%n påminnelser kommer snart"},
   "%n reminders are due": {
     "one": "%n påminnelse förfaller",
     "other": "%n påminnelser förfaller"
@@ -74,9 +76,9 @@
   "In a Week": "Om en vecka",
   "In an Hour": "Om en timme",
   "It was deleted in another window or by a command, so the change was not saved.": "Påminnelsen togs bort i ett annat fönster eller av ett kommando. Ändringen sparades inte.",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Dess påminnelse tas bort med den. Ångra tar tillbaka den.",
-    "other": "Dess %n påminnelser tas bort med den. Ångra tar tillbaka dem."
+    "other": "Dess %Ln påminnelser tas bort med den. Ångra tar tillbaka dem."
   },
   "Link": "Länk",
   "List": "Lista",
@@ -159,7 +161,7 @@
   "The desktop did not accept a notification: %1": "Skrivbordet godtog inte en avisering: %1",
   "The reminder’s list, section, or parent has changed.": "Påminnelsens lista, avsnitt eller överordnade påminnelse har ändrats.",
   "There are no completed reminders to delete": "Det finns inga slutförda påminnelser att ta bort",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Den här listan är sorterad efter %1. Tryck på S för Manuell ordning för att ordna om den.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Listan är sorterad efter %1. Välj Manuell ordning för att ordna om den.",
   "This sheet": "Den här översikten",
   "Time": "Tid",
   "Title": "Titel",

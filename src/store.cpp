@@ -3,12 +3,14 @@
 #include "recurrence.h"
 
 #include <QCoreApplication>
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QSet>
 #include <QSqlError>
 #include <QStandardPaths>
+#include <QThread>
 #include <QVariant>
 #include <algorithm>
 #include <atomic>
@@ -46,7 +48,9 @@ bool sameFile(const QString &a, const QString &b) {
 const char *const reminderColumns =
     "id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
     "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
-    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at, late_fold";
+    "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at, late_fold, early_scheduled_at, draft";
+
+constexpr int busyTimeoutMs = 4000;
 
 Reminder reminderFrom(const QSqlQuery &query) {
     Reminder r;
@@ -76,6 +80,8 @@ Reminder reminderFrom(const QSqlQuery &query) {
     r.snoozeUntil = query.value(i++).toLongLong();
     r.scheduledAt = query.value(i++).toLongLong();
     r.lateFold = query.value(i++).toBool();
+    r.earlyScheduledAt = query.value(i++).toLongLong();
+    r.draft = query.value(i++).toBool();
     return r;
 }
 
@@ -126,6 +132,7 @@ Reminder rebased(const Reminder &current, const Reminder &before, const Reminder
     TAKE(flagged);
     TAKE(tags);
     TAKE2(completed, completedAt);
+    TAKE(draft);
     TAKE(position);
     TAKE(alertedDue);
     TAKE(alertedEarly);
@@ -178,8 +185,8 @@ struct Store::Rows {
 bool Reminder::sameContent(const Reminder &other) const {
     auto fields = [](const Reminder &r) {
         return std::tie(r.id, r.listId, r.sectionId, r.parentId, r.title, r.notes, r.url, r.due, r.dueMinutes,
-                        r.lateFold, r.repeat, r.repeatEnd, r.early, r.priority, r.flagged, r.tags, r.completed,
-                        r.completedAt, r.createdAt, r.modifiedAt, r.scheduledAt, r.position);
+                        r.lateFold, r.repeat, r.repeatEnd, r.early, r.priority, r.flagged, r.tags, r.completed, r.draft,
+                        r.completedAt, r.createdAt, r.modifiedAt, r.scheduledAt, r.earlyScheduledAt, r.position);
     };
     return fields(*this) == fields(other);
 }
@@ -271,7 +278,7 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
     m_db = QSqlDatabase::addDatabase("QSQLITE", m_connection);
     m_db.setDatabaseName(m_path);
     // The window, the command line, and the background alerts may all write.
-    m_db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=4000");
+    m_db.setConnectOptions(QString("QSQLITE_BUSY_TIMEOUT=%1").arg(busyTimeoutMs));
     if (!m_db.open()) {
         fail(QString("Could not open %1: %2").arg(m_path, m_db.lastError().text()));
         return;
@@ -280,7 +287,7 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
     const bool ready =
         // Every change is on the disk before it shows as saved: a laptop can
         // lose power, and a reminder that vanished is worse than a millisecond.
-        run("PRAGMA journal_mode=WAL") && run("PRAGMA synchronous=FULL") &&
+        enableWal() && run("PRAGMA synchronous=FULL") &&
         run("CREATE TABLE IF NOT EXISTS lists ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL,"
             "position REAL NOT NULL, sort TEXT NOT NULL DEFAULT 'manual')") &&
@@ -299,7 +306,8 @@ Store::Store(const QString &path, QObject *parent) : QObject(parent) {
             "created_at INTEGER NOT NULL DEFAULT 0, modified_at INTEGER NOT NULL DEFAULT 0,"
             "position REAL NOT NULL DEFAULT 0, alerted_due INTEGER NOT NULL DEFAULT 0,"
             "alerted_early INTEGER NOT NULL DEFAULT 0, snooze_until INTEGER NOT NULL DEFAULT 0,"
-            "scheduled_at INTEGER NOT NULL DEFAULT 0, late_fold INTEGER NOT NULL DEFAULT 0)") &&
+            "scheduled_at INTEGER NOT NULL DEFAULT 0, late_fold INTEGER NOT NULL DEFAULT 0,"
+            "early_scheduled_at INTEGER NOT NULL DEFAULT 0, draft INTEGER NOT NULL DEFAULT 0)") &&
         // Files from Nudge 0.1.3 and earlier: until a reminder is given a
         // moment anew, it was last given one when it was last changed.
         migrate() &&
@@ -339,6 +347,29 @@ bool Store::run(const QString &sql) {
     return false;
 }
 
+bool Store::enableWal() {
+    const QDeadlineTimer deadline(busyTimeoutMs);
+    for (;;) {
+        QSqlError error;
+        {
+            QSqlQuery query(m_db);
+            if (query.exec("PRAGMA journal_mode=WAL") && query.next())
+                return true;
+            error = query.lastError();
+        }
+        // Two connections opening a new file can both hold a read lock while
+        // asking for the exclusive lock. SQLite skips its busy wait then.
+        constexpr int sqliteBusy = 5;
+        constexpr int sqliteLocked = 6;
+        const int code = error.nativeErrorCode().toInt() & 0xff;
+        if (deadline.hasExpired() || (code != sqliteBusy && code != sqliteLocked)) {
+            fail(error.text());
+            return false;
+        }
+        QThread::msleep(20);
+    }
+}
+
 bool Store::hasColumn(const QString &table, const QString &column) {
     QSqlQuery query(m_db);
     if (!query.exec(QString("PRAGMA table_info(%1)").arg(table)))
@@ -350,7 +381,8 @@ bool Store::hasColumn(const QString &table, const QString &column) {
 }
 
 bool Store::migrate() {
-    if (hasColumn("reminders", "scheduled_at") && hasColumn("reminders", "late_fold"))
+    if (hasColumn("reminders", "scheduled_at") && hasColumn("reminders", "late_fold") &&
+        hasColumn("reminders", "early_scheduled_at") && hasColumn("reminders", "draft"))
         return true;
     if (!run("BEGIN IMMEDIATE"))
         return false;
@@ -360,6 +392,9 @@ bool Store::migrate() {
           run("UPDATE reminders SET scheduled_at = modified_at"))) &&
         (hasColumn("reminders", "late_fold") ||
          run("ALTER TABLE reminders ADD COLUMN late_fold INTEGER NOT NULL DEFAULT 0")) &&
+        (hasColumn("reminders", "early_scheduled_at") ||
+         run("ALTER TABLE reminders ADD COLUMN early_scheduled_at INTEGER NOT NULL DEFAULT 0")) &&
+        (hasColumn("reminders", "draft") || run("ALTER TABLE reminders ADD COLUMN draft INTEGER NOT NULL DEFAULT 0")) &&
         run("COMMIT"))
         return true;
     m_db.rollback();
@@ -391,14 +426,15 @@ void Store::prepare() {
     m_putReminder = QSqlQuery(m_db);
     m_putReminder.prepare(
         QString("INSERT OR REPLACE INTO reminders (%1) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .arg(QLatin1String(reminderColumns)));
     m_putList = QSqlQuery(m_db);
     m_putList.prepare("INSERT OR REPLACE INTO lists (id, name, color, position, sort) VALUES (?, ?, ?, ?, ?)");
     m_putSection = QSqlQuery(m_db);
     m_putSection.prepare("INSERT OR REPLACE INTO sections (id, list_id, name, position) VALUES (?, ?, ?, ?)");
     m_setAlerted = QSqlQuery(m_db);
-    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? WHERE id = ?");
+    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? "
+                        "WHERE id = ? AND completed = 0 AND due = ? AND due_minutes = ? AND late_fold = ? AND early = ?");
 }
 
 // Everything is read in one read transaction, so it is one moment of the
@@ -681,6 +717,8 @@ bool Store::write(Reminder &r) {
     query.bindValue(i++, r.snoozeUntil);
     query.bindValue(i++, r.scheduledAt);
     query.bindValue(i++, r.lateFold);
+    query.bindValue(i++, r.earlyScheduledAt);
+    query.bindValue(i++, r.draft);
     if (!query.exec()) {
         fail(query.lastError().text());
         m_broken = true;
@@ -826,6 +864,8 @@ qint64 Store::put(Reminder r) {
     begin();
     if (!rebase(r, before, &Store::fetchReminder))
         return commit() ? r.id : 0;
+    if (!r.title.trimmed().isEmpty())
+        r.draft = false;
     if (r.repeat == "weekdays" && (!before || r.due != before->due || r.repeat != before->repeat))
         r.due = Repeat::firstWorkday(r.due);
     if (!r.due.isValid() && !r.repeat.isEmpty() && (!before || before->due.isValid() || before->repeat != r.repeat)) {
@@ -858,8 +898,10 @@ qint64 Store::put(Reminder r) {
     // A new date or time is a new moment to alert at, given it now.
     const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes ||
                        before->lateFold != r.lateFold;
-    if (moved || before->early != r.early)
+    if (moved)
         r.scheduledAt = now;
+    if (moved || before->early != r.early)
+        r.earlyScheduledAt = now;
     if (before && moved)
         r.alertedDue = r.alertedEarly = r.snoozeUntil = 0;
     else if (before && before->early != r.early)
@@ -963,7 +1005,7 @@ qsizetype Store::removeReminders(const QVector<qint64> &ids) {
 void Store::removeEmptyDraft(qint64 id) {
     Tx tx(this, {}, Latest);
     if (const Reminder *r = tx ? reminder(id) : nullptr;
-        r && r->title.isEmpty() && r->notes.trimmed().isEmpty() && childrenOf(id).isEmpty())
+        r && !r->hasContent() && childrenOf(id).isEmpty())
         eraseReminder(id);
 }
 
@@ -981,9 +1023,9 @@ void Store::cleanUpDrafts(qint64 olderThan) {
             blank.append(r.id);
     const bool recording = std::exchange(m_recording, false);
     const auto removed = removeReminders(blank);
-    tx.commit();
+    const bool saved = tx.commit();
     m_recording = recording;
-    if (removed)
+    if (removed && saved)
         clearUndo();
 }
 
@@ -1036,12 +1078,12 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
     if (completed)
         *completed = false;
     const Reminder *existing = reminder(id);
-    if (!m_open || !existing || existing->completed)
+    if (!m_open || !existing || existing->completed || existing->draft)
         return {};
     const Reminder offered = *existing;
     Tx tx(this, {}, Latest);
     existing = tx ? reminder(id) : nullptr;
-    if (!existing || existing->completed || existing->due != offered.due ||
+    if (!existing || existing->completed || existing->draft || existing->due != offered.due ||
         existing->dueMinutes != offered.dueMinutes || existing->lateFold != offered.lateFold)
         return {};
     Reminder r = *existing;
@@ -1178,16 +1220,15 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
                             current->lateFold == r.lateFold;
     if (sameMoment) {
         r.alertedDue = current->alertedDue;
-        r.alertedEarly = current->alertedEarly;
+        if (current->early == r.early)
+            r.alertedEarly = current->alertedEarly;
         r.snoozeUntil = current->snoozeUntil;
     } else if (r.snoozeUntil <= r.modifiedAt) {
         r.snoozeUntil = 0;
     }
     // Given back another moment, it was given it just now.
-    if (sameMoment && current->early == r.early)
-        r.scheduledAt = current->scheduledAt;
-    else
-        r.scheduledAt = r.modifiedAt;
+    r.scheduledAt = sameMoment ? current->scheduledSince() : r.modifiedAt;
+    r.earlyScheduledAt = sameMoment && current->early == r.early ? current->earlySince() : r.modifiedAt;
     if (!write(r))
         return;
     m_reminders.insert(id, r);
@@ -1328,6 +1369,10 @@ void Store::setAlerted(qint64 id, qint64 due, qint64 early, qint64 snoozeUntil) 
     m_setAlerted.bindValue(1, early);
     m_setAlerted.bindValue(2, snoozeUntil);
     m_setAlerted.bindValue(3, id);
+    m_setAlerted.bindValue(4, found->due.isValid() ? isoDate(found->due) : QStringLiteral(""));
+    m_setAlerted.bindValue(5, found->dueMinutes);
+    m_setAlerted.bindValue(6, found->lateFold);
+    m_setAlerted.bindValue(7, found->early);
     if (!m_setAlerted.exec())
         fail(m_setAlerted.lastError().text());
 }

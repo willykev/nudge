@@ -461,7 +461,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             minutes = hours[dayPart] * 60;
         } else if (guessed) {
             const int hour = minutes / 60 % 12;
-            const bool nextMorning = dayPart == 3 && hour >= 1 && hour <= 4;
+            const bool nextMorning = dayPart == 3 && hour <= 4;
             if (nextMorning)
                 date = date.addDays(1);
             minutes = (hour + (dayPart == 0 || nextMorning ? 0 : 12)) * 60 + minutes % 60;

@@ -1,6 +1,9 @@
 {
+  "%n reminders": {"one": "%n recordatorio", "many": "%n recordatorios", "other": "%n recordatorios"},
+  "%n reminders are coming up": {"one": "Se acerca %n recordatorio", "many": "Se acercan %n recordatorios", "other": "Se acercan %n recordatorios"},
   "%n reminders are due": {
     "one": "%n recordatorio vence",
+    "many": "%n recordatorios vencen",
     "other": "%n recordatorios vencen"
   },
   "1 day before": "1 día antes",
@@ -35,6 +38,7 @@
   "Delete “%1”?": "¿Eliminar “%1”?",
   "Deleted %n completed reminders": {
     "one": "Se eliminó %n recordatorio completado",
+    "many": "Se eliminaron %n recordatorios completados",
     "other": "Se eliminaron %n recordatorios completados"
   },
   "Deleted “%1”. Undo brings it back.": "Se eliminó “%1”. Deshacer lo recupera.",
@@ -51,18 +55,22 @@
   "Ends": "Termina",
   "Every %n days": {
     "one": "Cada %n día",
+    "many": "Cada %n días",
     "other": "Cada %n días"
   },
   "Every %n months": {
     "one": "Cada %n mes",
+    "many": "Cada %n meses",
     "other": "Cada %n meses"
   },
   "Every %n weeks": {
     "one": "Cada %n semana",
+    "many": "Cada %n semanas",
     "other": "Cada %n semanas"
   },
   "Every %n years": {
     "one": "Cada %n año",
+    "many": "Cada %n años",
     "other": "Cada %n años"
   },
   "First or last": "Primero o último",
@@ -74,9 +82,10 @@
   "In a Week": "En una semana",
   "In an Hour": "En una hora",
   "It was deleted in another window or by a command, so the change was not saved.": "Se eliminó en otra ventana o mediante un comando, por lo que el cambio no se guardó.",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Su recordatorio se elimina con ella. Deshacer lo recupera.",
-    "other": "Sus %n recordatorios se eliminan con ella. Deshacer los recupera."
+    "many": "Sus %Ln recordatorios se eliminan con ella. Deshacer los recupera.",
+    "other": "Sus %Ln recordatorios se eliminan con ella. Deshacer los recupera."
   },
   "Link": "Enlace",
   "List": "Lista",
@@ -159,7 +168,7 @@
   "The desktop did not accept a notification: %1": "El escritorio no aceptó una notificación: %1",
   "The reminder’s list, section, or parent has changed.": "Cambió la lista, la sección o el recordatorio principal.",
   "There are no completed reminders to delete": "No hay recordatorios completados que eliminar",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Esta lista está ordenada por %1. Presiona S para Orden manual y reorganizarla.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Esta lista está ordenada por %1. Elige Orden manual para reorganizarla.",
   "This sheet": "Esta hoja",
   "Time": "Hora",
   "Title": "Título",

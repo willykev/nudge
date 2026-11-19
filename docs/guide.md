@@ -16,12 +16,9 @@ on, and keeps everything in one local file.
   daily, weekdays, weekly, monthly, yearly, or every few of those, with an
   end date. Completing a repeating reminder moves it to its next date and
   keeps what was done in Completed.
-- **Typed dates.** A new reminder reads its own date as you type:
-  `Call the dentist tomorrow at 9 #health !!` is a title, a date, a time, a
-  tag, and a priority. The date field takes the same words. A time without am
-  or pm is a guess: an hour from 1 to 7 is the afternoon (`at 5` is 17:00, and
-  on a 12-hour clock `5:30` is 17:30), 8 to 11 the morning, and 12 noon. Type
-  `5:30am` or `05:30` for an early time.
+- **Typed dates.** In `Call the dentist tomorrow at 9 #health !!`, Nudge
+  reads the title, date, time, tag, and priority as you type. Search for
+  `#health` to find reminders with that tag.
 - **Alerts** as desktop notifications, with buttons to complete the reminder
   or be reminded in an hour or tomorrow. A reminder with a date but no time
   alerts at nine in the morning.
@@ -71,6 +68,37 @@ To update, run `git pull` and `bin/install` again. To remove Nudge, run
 reminders stay in `~/.local/share/nudge/`; delete that folder to remove them
 too.
 
+## Set a date or repeat
+
+Type a date in a new reminder's title or press `D` to set it on its own.
+Numeric dates follow the desktop's date order. Use `2026-12-24` for a date
+you can paste in any language. The editable Date and Ends fields include the
+year so you can copy a date and paste it back. In the calendar, use the arrow
+keys to move a day or week, Page Up or Page Down to change months, and Return
+to pick a date.
+
+For a time without am or pm, Nudge reads 1 to 7 as afternoon, 8 to 11 as
+morning, and 12 as noon. On a 12-hour clock that makes `5:30` 17:30.
+Type `5:30am` or `05:30` for an early time, or write
+`tomorrow morning at 6`. On their own, morning, afternoon, evening, and
+night after a date mean 09:00, 15:00, 18:00, and 21:00 respectively.
+`Tomorrow night at 12` is midnight at the end of tomorrow.
+
+Write `on Sunday` or `at midnight` to make the date or time clear in a title.
+Ranges such as `from 5pm to 6pm` and rules such as `every second Tuesday`
+stay in the title. `This Friday` includes today when today is Friday.
+
+A repeat on weekdays starts on Monday if its date falls on the weekend.
+With an explicit weekday, `every Friday` starts on the first Friday on or
+after the given start date. Type `every 2 weeks until 2027-06-01` to set an
+end date. An occurrence on the end date is included. If the day is absent
+from a month or year, a monthly or yearly reminder uses the last day of
+that month and keeps its original day for later occurrences.
+
+Completing a repeat leaves a completed occurrence and moves the reminder
+forward. If you complete a one-off reminder that has a repeating subtask,
+the subtask's next occurrence becomes a reminder of its own in the same list.
+
 ## Shortcuts
 
 `?` shows these in the window, and the line at its foot keeps the main ones
@@ -105,6 +133,9 @@ in sight.
 | `Esc` | Back to the reminders |
 | `Q` | Quit |
 
+While you rename a reminder, its row stays in view. Finish the title before
+scrolling. To move reminders by hand, select **Manual Order** in the sort menu.
+
 ## Reminders while the window is closed
 
 Alerts arrive while Nudge is open. To have them arrive when it is closed too,
@@ -112,6 +143,14 @@ press `B` in the window or run `nudge background on`. That enables a small
 user service (`nudge.service`, which runs `nudge daemon`); `nudge background
 off` disables it again. After a sleep, whatever came due while the lid was
 closed is announced as the machine wakes.
+
+Choose **In an Hour** or **Tomorrow** to postpone an alert, including an
+early alert. If the due time falls before the snooze ends, it is covered by
+the snoozed alert. **Open** shows the reminder in the window.
+
+An all-day reminder alerts at 09:00. An early alert set a day or week ahead
+of it also arrives at 09:00 local time, even when the clocks change. For a
+reminder with a time, the lead measures elapsed time.
 
 ## From the command line
 
@@ -134,16 +173,27 @@ nudge export backup.json
 `nudge skill install` installs a short skill so coding agents can keep your
 reminders for you.
 
+Use `nudge add --literal "Send  the report"` to save the title as written,
+including its spacing. For a repeating reminder, `nudge done` returns the
+ID of the reminder that moved forward. The entry in Completed has its own ID
+and is the one to pass to `nudge reopen`.
+
 ## Where things are
 
 Reminders live in `~/.local/share/nudge/nudge.db`, a SQLite file written
-through on every change. The folder and the file, and the backups `nudge
-export` writes, are readable by you alone. `nudge export` writes everything as
-JSON, and `nudge import` reads it back, keeping apart lists and sections that
-have the same name. Setting `NUDGE_DB` points Nudge at another file.
+through on every change. The default folder, the database, and the backups
+`nudge export` writes are readable by you alone. Setting `NUDGE_DB` points
+Nudge at another file. An existing folder chosen that way keeps its permissions.
 
 Commands read dates and times in the language picked for the desktop, as the
 window does, so `5:30` is the same time typed in either.
+
+### Back up and restore
+
+`nudge export backup.json` saves a JSON backup. Choose a path separate from the
+open database and its journal files. `nudge import backup.json` reads it back
+with its lists, sections, subtasks, completion times, and pending snoozes.
+An invalid backup leaves the current reminders alone.
 
 ## What it does not do
 

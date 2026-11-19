@@ -15,19 +15,36 @@ Fixes from a review of 0.1.3.
   older exports still import. Imported lists are matched to existing ones
   only once each.
 - Delete Completed deletes the reminders it asked about, not ones completed
-  while the question was up.
+  while the question was up. The question stays the same if reminders are
+  reopened while it is on screen.
+- Deleting a list keeps reminders moved out in another window, and deleting
+  completed reminders keeps a parent if a subtask still needs it. Undo keeps
+  independent edits from other writers.
+- Several commands can start a new database or upgrade an old one together.
+  First reminders share one default list, and two completions of the same
+  repeat leave one entry in Completed.
+- Import checks the backup before saving it. Completion times and pending
+  snoozes travel with a backup, and large backups restore faster.
 
 ### Alerts
 
 - Editing a reminder's notes, title, or anything but its date, time, or
   early alert no longer silences an alert that is due. Nudge keeps when each
   reminder was last given its moment, apart from when it was last edited.
+- Snoozing an early alert covers the due time if it falls within the snooze.
+  An early alert set in days or weeks for an all-day reminder stays at 09:00
+  when the clocks change. A group of early alerts says what is coming up.
+- **Open** on an alert shows its reminder, including alerts sent while the
+  window was closed.
 
 ### Privacy
 
-- The data folder is made readable by its owner alone, and so are the
+- Nudge's own data folder is made readable by its owner alone, and so are the
   database, its journal files, and backups written by `nudge export`. Files
   an earlier Nudge made readable by others are made private when opened.
+- An existing folder picked with `NUDGE_DB` keeps its permissions. Export
+  refuses the database and its journals as destinations, and taking a
+  screenshot keeps any sample typing separate from saved reminders.
 
 ### Commands
 
@@ -35,11 +52,34 @@ Fixes from a review of 0.1.3.
   `5:30` means the same in `nudge add` as in the window.
 - `nudge list today --list Home` lists what is due today in Home. `--list`,
   `--tag`, and `--search` narrow a named view instead of replacing it.
+- List names are matched exactly when there is an exact match. Search takes a
+  tag as it is shown, for example `#health`, and `--literal` keeps the spaces
+  in a title. A failed skill install keeps the existing skill where it was.
+
+### Dates and repeats
+
+- Typed dates understand the desktop's numeric date order, four-digit years,
+  dayparts such as `tomorrow morning at 6`, and end dates such as
+  `every 2 weeks until 2027-06-01`. Time ranges and unsupported monthly
+  rules stay in the title.
+- Weekday repeats start on a day their rule includes. Completed occurrences
+  stay in Completed when their parent moves forward. A repeating subtask
+  carries on in its list when its one-off parent is completed.
+
+### Window
+
+- A reminder stays in view while its title is being edited. An empty draft
+  appears only in the window where it is being written.
+- The editable Date and Ends fields include the year. A language change keeps
+  the selected repeat, early alert, and priority. The list deletion question
+  groups digits in large counts.
 
 ### Accessibility
 
 - A reminder's row, its completion checkbox, and the calendar's days are
   exposed to screen readers, with names, states, and actions.
+- Use the arrow keys and Page Up or Page Down to move in the calendar, and
+  Return to choose a date.
 
 ## 0.1.3 — 2026-11-16
 

@@ -1,4 +1,6 @@
 {
+  "%n reminders": {"one": "%n påmindelse", "other": "%n påmindelser"},
+  "%n reminders are coming up": {"one": "%n påmindelse kommer snart", "other": "%n påmindelser kommer snart"},
   "%n reminders are due": {
     "one": "%n påmindelse forfalder",
     "other": "%n påmindelser forfalder"
@@ -74,9 +76,9 @@
   "In a Week": "Om en uge",
   "In an Hour": "Om en time",
   "It was deleted in another window or by a command, so the change was not saved.": "Den blev slettet i et andet vindue eller af en kommando, så ændringen blev ikke gemt.",
-  "Its %n reminders are deleted with it. Undo brings them back.": {
+  "Its %Ln reminders are deleted with it. Undo brings them back.": {
     "one": "Dens påmindelse slettes sammen med den. Fortryd henter den tilbage.",
-    "other": "Dens %n påmindelser slettes sammen med den. Fortryd henter dem tilbage."
+    "other": "Dens %Ln påmindelser slettes sammen med den. Fortryd henter dem tilbage."
   },
   "Link": "Link",
   "List": "Liste",
@@ -159,7 +161,7 @@
   "The desktop did not accept a notification: %1": "Skrivebordet accepterede ikke en notifikation: %1",
   "The reminder’s list, section, or parent has changed.": "Påmindelsens liste, sektion eller overordnede påmindelse er ændret.",
   "There are no completed reminders to delete": "Der er ingen fuldførte påmindelser at slette",
-  "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Denne liste er sorteret efter %1. Tryk på S for Manuel rækkefølge for at ændre den.",
+  "This list is sorted by %1. Choose Manual Order to rearrange it.": "Listen er sorteret efter %1. Vælg Manuel rækkefølge for at flytte punkterne.",
   "This sheet": "Dette ark",
   "Time": "Tid",
   "Title": "Titel",

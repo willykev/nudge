@@ -110,8 +110,14 @@ void Translator::reload() {
 
     // omarchy-language replaces the file, which drops it from the watch, and a
     // first pick creates it; watch its directory too and re-arm every time.
-    const QString directory = QFileInfo(m_languageFile).absolutePath();
-    if (QFileInfo::exists(directory))
+    QString directory = QFileInfo(m_languageFile).absolutePath();
+    while (!QFileInfo(directory).isDir()) {
+        const QString parent = QFileInfo(directory).absolutePath();
+        if (parent == directory)
+            break;
+        directory = parent;
+    }
+    if (QFileInfo(directory).isDir())
         m_watcher.addPath(directory);
     if (QFileInfo::exists(m_languageFile))
         m_watcher.addPath(m_languageFile);
@@ -147,6 +153,7 @@ void Translator::reload() {
     // too, and right-to-left languages mirror the window.
     const QLocale locale = formatLocale(language);
     QLocale::setDefault(locale);
-    QGuiApplication::setLayoutDirection(locale.textDirection());
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
+        QGuiApplication::setLayoutDirection(locale.textDirection());
     emit changed();
 }

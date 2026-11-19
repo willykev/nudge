@@ -6,6 +6,7 @@
 #include "recurrence.h"
 #include "remindermodel.h"
 #include "store.h"
+#include "translator.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -35,6 +36,11 @@
 namespace {
 
 const QStringList priorities{"none", "low", "medium", "high"};
+
+QString reminderTitle(const Reminder &r) {
+    return r.title.isEmpty() && !r.draft && r.hasContent()
+               ? QCoreApplication::translate("Store", "Untitled reminder") : r.title;
+}
 
 // What is stored can come from an import or another program, so anything in
 // it that could steer the terminal (escape sequences, carriage returns, C1
@@ -140,7 +146,7 @@ QJsonObject toJson(const Store &store, const Reminder &r) {
     const TaskList *list = store.list(r.listId);
     const Section *section = store.section(r.sectionId);
     return {{"id", r.id},
-            {"title", r.title},
+            {"title", reminderTitle(r)},
             {"notes", r.notes},
             {"url", r.url},
             {"list", list ? list->name : QString()},
@@ -165,7 +171,7 @@ QJsonObject toJson(const Store &store, const Reminder &r) {
 
 QString toText(const Store &store, const Reminder &r) {
     QStringList parts{QString("%1").arg(r.id, 5), r.completed ? "[x]" : "[ ]",
-                      QString(r.parentId ? "  " : "") + r.title};
+                      QString(r.parentId ? "  " : "") + reminderTitle(r)};
     if (r.due.isValid())
         parts << r.due.toString(Qt::ISODate) + (r.dueMinutes >= 0 ? " " + isoTime(r.dueMinutes) : QString());
     if (!r.repeat.isEmpty())
@@ -613,8 +619,7 @@ int list(const QStringList &arguments) {
     QJsonArray found;
     for (const Row &row : buildRows(store, view, options)) {
         const Reminder *r = row.heading ? nullptr : store.reminder(row.id);
-        // One without a title is being typed in the window right now.
-        if (!r || r->title.isEmpty() || (allowed && !allowed->contains(r->id)))
+        if (!r || (allowed && !allowed->contains(r->id)))
             continue;
         if (command.wantsJson())
             found << toJson(store, *r);
@@ -743,10 +748,10 @@ int exportAll(const QStringList &arguments) {
     QVector<const Reminder *> ordered;
     QSet<qint64> namedParents;
     for (const Reminder &r : store.reminders())
-        if (r.hasContent() && r.parentId)
+        if (!r.draft && r.hasContent() && r.parentId)
             namedParents.insert(r.parentId);
     for (const Reminder &r : store.reminders())
-        if (r.hasContent() || namedParents.contains(r.id))
+        if ((!r.draft && r.hasContent()) || namedParents.contains(r.id))
             ordered << &r;
     std::sort(ordered.begin(), ordered.end(), [](const Reminder *a, const Reminder *b) {
         return a->listId != b->listId ? a->listId < b->listId
@@ -1173,10 +1178,22 @@ int runCli(const QStringList &arguments) {
     return help(arguments);
 }
 
-WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun) {
+WindowLaunch windowLaunch(const QString &nudge, const QProcessEnvironment &session, const QString &systemdRun,
+                          qint64 reminderId) {
+    QStringList arguments{"open"};
+    if (reminderId > 0)
+        arguments << "--reminder" << QString::number(reminderId);
     if (systemdRun.isEmpty())
-        return {nudge, {"open"}, session};
-    return {systemdRun, {"--user", "--scope", "--collect", "--quiet", nudge, "open"}, session};
+        return {nudge, arguments, session};
+    return {systemdRun, QStringList{"--user", "--scope", "--collect", "--quiet", nudge} + arguments, session};
+}
+
+int runCliInDesktopLocale(const QStringList &arguments, const QString &languageFile) {
+    Translator translator(languageFile);
+    QCoreApplication::installTranslator(&translator);
+    const int result = runCli(arguments);
+    QCoreApplication::removeTranslator(&translator);
+    return result;
 }
 
 int runDaemon(const QProcessEnvironment &session) {
@@ -1192,11 +1209,11 @@ int runDaemon(const QProcessEnvironment &session) {
         notifier.act(id, action, QDateTime::currentDateTime());
     });
     // Clicking an alert brings up the window: the one already open, or a new one.
-    QObject::connect(&notifier, &Notifier::opened, &notifier, [session] {
-        if (focusNudgeWindow())
+    QObject::connect(&notifier, &Notifier::opened, &notifier, [&store, session](qint64 id) {
+        if (revealNudgeWindow(store.path(), id) || (!id && focusNudgeWindow()))
             return;
         const WindowLaunch launch = windowLaunch(QCoreApplication::applicationFilePath(), session,
-                                                 QStandardPaths::findExecutable("systemd-run"));
+                                                 QStandardPaths::findExecutable("systemd-run"), id);
         QProcess process;
         process.setProgram(launch.program);
         process.setArguments(launch.arguments);
