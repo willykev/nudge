@@ -11,6 +11,7 @@
   "2 hours before": "2 timmar före",
   "30 minutes before": "30 minuter före",
   "5 minutes before": "5 minuter före",
+  "A repeating reminder needs a date.": "En återkommande påminnelse behöver ett datum.",
   "Add": "Lägg till",
   "All": "Alla",
   "Back to a reminder of its own": "Tillbaka till en egen påminnelse",
@@ -28,10 +29,6 @@
   "Date Created": "Skapad",
   "Dates": "Datum",
   "Delete": "Ta bort",
-  "Delete %n completed reminders?": {
-    "one": "Ta bort %n slutförd påminnelse?",
-    "other": "Ta bort %n slutförda påminnelser?"
-  },
   "Delete completed": "Ta bort slutförda",
   "Delete Completed": "Ta bort slutförda",
   "Delete List": "Ta bort lista",
@@ -76,6 +73,7 @@
   "High": "Hög",
   "In a Week": "Om en vecka",
   "In an Hour": "Om en timme",
+  "It was deleted in another window or by a command, so the change was not saved.": "Påminnelsen togs bort i ett annat fönster eller av ett kommando. Ändringen sparades inte.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "Dess påminnelse tas bort med den. Ångra tar tillbaka den.",
     "other": "Dess %n påminnelser tas bort med den. Ångra tar tillbaka dem."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Sorterad efter %1",
   "Tags": "Taggar",
   "The desktop did not accept a notification: %1": "Skrivbordet godtog inte en avisering: %1",
+  "The reminder’s list, section, or parent has changed.": "Påminnelsens lista, avsnitt eller överordnade påminnelse har ändrats.",
   "There are no completed reminders to delete": "Det finns inga slutförda påminnelser att ta bort",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Den här listan är sorterad efter %1. Tryck på S för Manuell ordning för att ordna om den.",
   "This sheet": "Den här översikten",

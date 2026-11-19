@@ -96,10 +96,20 @@ bool ready(Store &store) {
 }
 
 const TaskList *listNamed(const Store &store, const QString &name) {
-    for (const TaskList &list : store.lists())
-        if (list.name.compare(name, Qt::CaseInsensitive) == 0)
-            return &list;
-    return nullptr;
+    const TaskList *exact = nullptr, *folded = nullptr;
+    bool ambiguous = false;
+    for (const TaskList &list : store.lists()) {
+        if (list.name == name) {
+            if (exact)
+                return nullptr;
+            exact = &list;
+        }
+        if (list.name.compare(name, Qt::CaseInsensitive) == 0) {
+            ambiguous |= folded != nullptr;
+            folded = &list;
+        }
+    }
+    return exact ? exact : ambiguous ? nullptr : folded;
 }
 
 QString listNames(const Store &store) {
@@ -321,6 +331,10 @@ int add(const QStringList &arguments) {
     Store store;
     if (!ready(store))
         return 1;
+    Failures failures(store);
+    Store::Tx tx(&store, {}, Store::Latest);
+    if (!tx)
+        return failures.report("The reminder could not be saved");
     Reminder r;
     QuickEntry entry;
     entry.title = text;
@@ -362,15 +376,10 @@ int add(const QStringList &arguments) {
     // A done reminder has no open subtasks, so adding one reopens it.
     const Reminder *parent = store.reminder(parentId);
     const bool reopen = parent && parent->completed;
-    Failures failures(store);
-    qint64 id = 0;
-    {
-        Store::Tx tx(&store);
-        if (reopen)
-            store.reopen(parentId);
-        id = store.put(r);
-    }
-    if (failures.any())
+    if (reopen)
+        store.reopen(parentId);
+    const qint64 id = store.put(r);
+    if (!tx.commit() || failures.any())
         return failures.report("The reminder could not be saved");
     const int result = report(command, store, id, "Added");
     if (result == 0 && reopen && !command.wantsJson())
@@ -392,6 +401,10 @@ int edit(const QStringList &arguments) {
     Store store;
     if (!ready(store))
         return 1;
+    Failures failures(store);
+    Store::Tx tx(&store, {}, Store::Latest);
+    if (!tx)
+        return failures.report("The change could not be saved");
     const qint64 id = command.arguments().value(0).toLongLong();
     const Reminder *existing = store.reminder(id);
     if (!existing)
@@ -413,21 +426,17 @@ int edit(const QStringList &arguments) {
     if (command.parser.isSet("unflag"))
         r.flagged = false;
 
-    Failures failures(store);
-    {
-        Store::Tx tx(&store);
-        if (r.listId != listId) {
-            // Its subtasks move with it.
-            for (qint64 childId : store.childrenOf(id)) {
-                Reminder child = *store.reminder(childId);
-                child.listId = r.listId;
-                child.sectionId = 0;
-                store.put(child);
-            }
+    store.put(r);
+    if (r.listId != listId) {
+        // Its subtasks move with it.
+        for (qint64 childId : store.childrenOf(id)) {
+            Reminder child = *store.reminder(childId);
+            child.listId = r.listId;
+            child.sectionId = 0;
+            store.put(child);
         }
-        store.put(r);
     }
-    if (failures.any())
+    if (!tx.commit() || failures.any())
         return failures.report("The change could not be saved");
     return report(command, store, id, "Changed");
 }
@@ -436,7 +445,7 @@ int edit(const QStringList &arguments) {
 // every one of them exists. An id named twice is acted on once: done twice
 // would skip a repeating reminder's next date.
 int each(const QStringList &arguments, const QString &name, const QString &description, const QString &verb,
-         const std::function<void(Store &, qint64)> &action) {
+         const std::function<bool(Store &, qint64)> &action) {
     Command command(name, description);
     command.parser.addPositionalArgument("id", "One or more reminders", "<id>...");
     command.json();
@@ -456,7 +465,7 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
         const Reminder *r = store.reminder(id);
         if (!r)
             return fail("There is no reminder " + word + ". Nothing was changed.");
-        if (!ids.contains(id)) {
+        if (!titles.contains(id)) {
             ids << id;
             titles.insert(id, r->title);
         }
@@ -468,8 +477,11 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
         Store::Tx tx(&store);
         for (qint64 id : ids) {
             const QString title = titles.value(id);
-            lines << QString("%1 %2: %3").arg(verb, QString::number(id), oneLine(title));
-            action(store, id);
+            const bool acted = action(store, id);
+            const QString result = acted ? verb
+                                 : !store.reminder(id) ? "No longer there"
+                                 : name == "reopen" ? "Already open" : "Already completed or moved on";
+            lines << QString("%1 %2: %3").arg(result, QString::number(id), oneLine(title));
             if (const Reminder *r = store.reminder(id))
                 changed << toJson(store, *r);
             else
@@ -607,7 +619,13 @@ int lists(const QStringList &arguments) {
     if (action == "add") {
         if (name.isEmpty())
             return fail("Name the list: nudge lists add Groceries");
-        if (listNamed(store, name))
+        Failures failures(store);
+        Store::Tx tx(&store, {}, Store::Latest);
+        if (!tx)
+            return failures.report("The list could not be saved");
+        if (std::any_of(store.lists().cbegin(), store.lists().cend(), [&](const TaskList &list) {
+                return list.name.compare(name, Qt::CaseInsensitive) == 0;
+            }))
             return fail("There already is a list named " + name + ".");
         static const QRegularExpression hex("^#[0-9a-fA-F]{6}$");
         static const QStringList named{"red", "orange", "yellow", "green", "cyan", "blue", "magenta", "brown"};
@@ -618,9 +636,8 @@ int lists(const QStringList &arguments) {
         created.name = name;
         created.color = color.isEmpty() ? QString("blue") : color;
         created.position = store.lists().isEmpty() ? 1 : store.lists().last().position + 1;
-        Failures failures(store);
         created.id = store.put(created);
-        if (failures.any() || !created.id)
+        if (!tx.commit() || failures.any() || !created.id)
             return failures.report("The list could not be saved");
         if (command.wantsJson())
             print({{"id", created.id}, {"name", created.name}, {"color", created.color}});
@@ -629,6 +646,10 @@ int lists(const QStringList &arguments) {
         return 0;
     }
     if (action == "delete") {
+        Failures failures(store);
+        Store::Tx tx(&store, {}, Store::Latest);
+        if (!tx)
+            return failures.report("The list could not be deleted");
         const TaskList *doomed = listNamed(store, name);
         if (!doomed)
             return fail(QString("No list named %1. %2").arg(name, listNames(store)));
@@ -637,9 +658,8 @@ int lists(const QStringList &arguments) {
             return fail(QString("%1 holds %2 reminders. Add --force to delete them with it.")
                             .arg(oneLine(doomed->name), QString::number(holding)));
         const QString removed = doomed->name;
-        Failures failures(store);
         store.removeList(doomed->id);
-        if (failures.any())
+        if (!tx.commit() || failures.any())
             return failures.report("The list could not be deleted");
         if (command.wantsJson())
             print({{"deleted", removed}, {"reminders", holding}});
@@ -1010,13 +1030,17 @@ int runCli(const QStringList &arguments) {
         return edit(arguments);
     if (command == "done")
         return each(arguments, "done", "Complete reminders. A repeating one moves to its next date.", "Completed",
-                    [](Store &store, qint64 id) { store.complete(id, QDateTime::currentDateTime()); });
+                    [](Store &store, qint64 id) {
+                        bool completed = false;
+                        store.complete(id, QDateTime::currentDateTime(), &completed);
+                        return completed;
+                    });
     if (command == "reopen")
         return each(arguments, "reopen", "Mark reminders as not done.", "Reopened",
-                    [](Store &store, qint64 id) { store.reopen(id); });
+                    [](Store &store, qint64 id) { return store.reopen(id); });
     if (command == "delete")
         return each(arguments, "delete", "Delete reminders, with their subtasks.", "Deleted",
-                    [](Store &store, qint64 id) { store.removeReminder(id); });
+                    [](Store &store, qint64 id) { store.removeReminder(id); return true; });
     if (command == "lists")
         return lists(arguments);
     if (command == "export")

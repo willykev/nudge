@@ -11,6 +11,7 @@
   "2 hours before": "2 horas antes",
   "30 minutes before": "30 minutos antes",
   "5 minutes before": "5 minutos antes",
+  "A repeating reminder needs a date.": "Un recordatorio recurrente necesita una fecha.",
   "Add": "Agregar",
   "All": "Todos",
   "Back to a reminder of its own": "Volver a recordatorio independiente",
@@ -28,10 +29,6 @@
   "Date Created": "Fecha de creación",
   "Dates": "Fechas",
   "Delete": "Eliminar",
-  "Delete %n completed reminders?": {
-    "one": "¿Eliminar %n recordatorio completado?",
-    "other": "¿Eliminar %n recordatorios completados?"
-  },
   "Delete completed": "Eliminar completados",
   "Delete Completed": "Eliminar completados",
   "Delete List": "Eliminar lista",
@@ -76,6 +73,7 @@
   "High": "Alta",
   "In a Week": "En una semana",
   "In an Hour": "En una hora",
+  "It was deleted in another window or by a command, so the change was not saved.": "Se eliminó en otra ventana o mediante un comando, por lo que el cambio no se guardó.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "Su recordatorio se elimina con ella. Deshacer lo recupera.",
     "other": "Sus %n recordatorios se eliminan con ella. Deshacer los recupera."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Ordenado por %1",
   "Tags": "Etiquetas",
   "The desktop did not accept a notification: %1": "El escritorio no aceptó una notificación: %1",
+  "The reminder’s list, section, or parent has changed.": "Cambió la lista, la sección o el recordatorio principal.",
   "There are no completed reminders to delete": "No hay recordatorios completados que eliminar",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Esta lista está ordenada por %1. Presiona S para Orden manual y reorganizarla.",
   "This sheet": "Esta hoja",

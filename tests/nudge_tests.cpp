@@ -17,6 +17,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <array>
 #include <csignal>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -2363,6 +2364,189 @@ private slots:
 
     // ---- review fixes (0.1.3) ----
 
+    void deletingAListUsesItsCurrentMembers() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store window(path);
+        const qint64 home = addList(window, "Home"), work = addList(window, "Work");
+        const qint64 kept = add(window, home, "Moved out");
+        Store other(path);
+        Reminder moved = *other.reminder(kept);
+        moved.listId = work;
+        QVERIFY(other.put(moved));
+        const qint64 added = add(other, home, "Moved in");
+        window.removeList(home);
+
+        Store disk(path);
+        QVERIFY(!disk.list(home));
+        QVERIFY(disk.reminder(kept));
+        QCOMPARE(disk.reminder(kept)->listId, work);
+        QVERIFY(!disk.reminder(added));
+        QCOMPARE(add(other, home, "Stale destination"), 0);
+    }
+
+    void mergingAnOutsideEditRetiresOlderUndoStepsForThatRow() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store window(path);
+        const qint64 id = add(window, addList(window, "Home"), "Call the bank");
+        Reminder flagged = *window.reminder(id);
+        flagged.flagged = true;
+        QVERIFY(window.put(flagged));
+        Store other(path);
+        Reminder noted = *other.reminder(id);
+        noted.notes = "Ask about fees";
+        QVERIFY(other.put(noted));
+        flagged = *window.reminder(id);
+        flagged.priority = 3;
+        QVERIFY(window.put(flagged));
+        window.reloadIfChanged();
+        window.undo();
+        QCOMPARE(window.reminder(id)->priority, 0);
+        window.undo();
+        QCOMPARE(window.reminder(id)->notes, QString("Ask about fees"));
+    }
+
+    void acceptingDeleteCompletedKeepsAParentWithANewerChild() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 listId = addList(store, "Home");
+        const qint64 id = add(store, listId, "Parent");
+        store.complete(id, friday);
+        backend.setViewKey("list:" + QString::number(listId));
+        const auto asked = backend.completedIds();
+        Store other(path);
+        Reminder child;
+        child.title = "New subtask";
+        child.parentId = id;
+        child.listId = listId;
+        child.completed = true;
+        child.completedAt = friday.toSecsSinceEpoch();
+        const qint64 childId = other.put(child);
+        QVERIFY(childId);
+        backend.clearCompleted(asked);
+        const Store disk(path);
+        QVERIFY(disk.reminder(id));
+        QVERIFY(disk.reminder(childId));
+        QCOMPARE(disk.reminder(childId)->parentId, id);
+    }
+
+    void aRepeatSetAfterAnOutsideDateClearStillHasADate() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        Backend backend(&store);
+        quiet(backend, dir);
+        backend.setClock([] { return friday; });
+        const qint64 id = add(store, addList(store, "Home"), "Call", friday.date().addDays(2));
+        Store other(path);
+        Reminder undated = *other.reminder(id);
+        undated.due = {};
+        QVERIFY(other.put(undated));
+        backend.setRepeat(id, "daily", 1);
+        const Store disk(path);
+        QCOMPARE(disk.reminder(id)->due, friday.date());
+        QCOMPARE(disk.reminder(id)->repeat, QString("daily:1"));
+    }
+
+    void completingAnOccurrenceThatMovedOnDoesNotCompleteItAgain() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store window(path);
+        const qint64 list = addList(window, "Home");
+        const qint64 id = add(window, list, "Call", friday.date());
+        Reminder repeating = *window.reminder(id);
+        repeating.repeat = "daily:1";
+        QVERIFY(window.put(repeating));
+        Store other(path);
+        QCOMPARE(other.complete(id, friday), friday.date().addDays(1));
+        QVERIFY(!window.complete(id, friday).isValid());
+        const Store disk(path);
+        QCOMPARE(disk.reminders().size(), 2);
+        QCOMPARE(disk.reminder(id)->due, friday.date().addDays(1));
+    }
+
+    void anEmptyEditorKeepsTheTitleAnotherWriterSaved() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        Backend backend(&store);
+        quiet(backend, dir);
+        const qint64 list = addList(store, "Home");
+        backend.setViewKey("list:" + QString::number(list));
+        const qint64 id = backend.addReminder();
+        const CliRun ran = cliRun(path, {"edit", QString::number(id), "--title", "New title"});
+        QCOMPARE(ran.code, 0);
+        QVERIFY(store.reloadIfChanged());
+        backend.commitTitle(id, "");
+        const Store disk(path);
+        QVERIFY(disk.reminder(id));
+        QCOMPARE(disk.reminder(id)->title, QString("New title"));
+    }
+
+    void overrideDirectoriesKeepTheirPermissions() {
+        QTemporaryDir dir;
+        const QString folder = dir.filePath("shared");
+        QVERIFY(QDir().mkdir(folder));
+        const auto shared = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                            QFile::ReadGroup | QFile::ExeGroup;
+        QVERIFY(QFile::setPermissions(folder, shared));
+        QCOMPARE(cliRun(folder + "/reminders.db", {"list"}).code, 0);
+        QVERIFY(QFileInfo(folder).permissions().testFlag(QFile::ReadGroup));
+        QVERIFY(!QFileInfo(folder + "/reminders.db").permissions().testFlag(QFile::ReadGroup));
+    }
+
+    void firstRemindersShareOneDefaultList() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store first(path), second(path);
+        const qint64 id = first.defaultListId();
+        QVERIFY(id);
+        QCOMPARE(second.defaultListId(), id);
+        const Store disk(path);
+        QCOMPARE(disk.lists().size(), 1);
+        QVERIFY(!first.canUndo());
+    }
+
+    void anExactListNameWinsOverAnInsensitiveMatch() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        const qint64 home = addList(store, "Home"), upper = addList(store, "HOME");
+        add(store, home, "Keep");
+        add(store, upper, "Drop");
+        QCOMPARE(cliRun(path, {"lists", "delete", "hOmE", "--force"}).code, 1);
+        QCOMPARE(cliRun(path, {"lists", "delete", "HOME", "--force"}).code, 0);
+        const Store disk(path);
+        QVERIFY(disk.list(home));
+        QVERIFY(!disk.list(upper));
+        QCOMPARE(disk.reminders().size(), 1);
+    }
+
+    void watchingReloadsDuringContinuingDirectoryChanges() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        const qint64 id = add(store, addList(store, "Home"), "Before");
+        store.watch();
+        Store other(path);
+        Reminder changed = *other.reminder(id);
+        changed.title = "After";
+        QVERIFY(other.put(changed));
+        QTimer noise;
+        connect(&noise, &QTimer::timeout, this, [&] {
+            const QString file = dir.filePath("output");
+            write(file, "output");
+            QFile::remove(file);
+        });
+        noise.start(15);
+        QTRY_COMPARE_WITH_TIMEOUT(store.reminder(id)->title, QString("After"), 500);
+        QVERIFY(noise.isActive());
+    }
+
     void aStaleWindowKeepsOthersChangesAndRestoresNothing() {
         QTemporaryDir dir;
         const QString path = dir.filePath("nudge.db");
@@ -2458,6 +2642,43 @@ private slots:
         Store store(path);
         QVERIFY(store.isOpen());
         QCOMPARE(store.reminders().constBegin()->scheduledAt, qint64(1234));
+    }
+
+    void simultaneousOpenersShareAnOlderFilesMigration() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        {
+            Store store(path);
+            add(store, addList(store, "Home"), "Stretch");
+        }
+        tamper(path, "ALTER TABLE reminders DROP COLUMN scheduled_at");
+        tamper(path, "UPDATE reminders SET modified_at = 1234");
+        {
+            auto blocker = QSqlDatabase::addDatabase("QSQLITE", "migration-blocker");
+            blocker.setDatabaseName(path);
+            QVERIFY(blocker.open());
+            QSqlQuery gate(blocker);
+            QVERIFY(gate.exec("BEGIN IMMEDIATE"));
+            std::array<qint64, 4> scheduled{};
+            {
+                std::array<std::unique_ptr<QThread>, 4> readers;
+                for (size_t i = 0; i < readers.size(); ++i) {
+                    readers[i].reset(QThread::create([&, i] {
+                        Store store(path);
+                        if (store.isOpen() && !store.reminders().isEmpty())
+                            scheduled[i] = store.reminders().cbegin()->scheduledAt;
+                    }));
+                    readers[i]->start();
+                }
+                QThread::msleep(100);
+                gate.exec("COMMIT");
+                for (const auto &reader : readers)
+                    reader->wait();
+            }
+            for (qint64 moment : scheduled)
+                QCOMPARE(moment, qint64(1234));
+        }
+        QSqlDatabase::removeDatabase("migration-blocker");
     }
 
     void remindersAreReadableByTheirOwnerAlone() {
@@ -3028,6 +3249,44 @@ private:
     }
 
 private slots:
+    void savingAListNameKeepsTheColorChangedWhileItsEditorWasOpen() {
+        QmlWindow w;
+        const qint64 id = addList(w.store, "Work");
+        const QString view = "list:" + QString::number(id);
+        w.backend.setViewKey(view);
+        QVERIFY(w.open());
+        const QVariant key(view);
+        QVERIFY(QMetaObject::invokeMethod(w.window, "editList", Q_ARG(QVariant, key)));
+        QTRY_VERIFY(w.window->property("popupOpen").toBool());
+        Store other(w.store.path());
+        TaskList recolored = *other.list(id);
+        recolored.color = "red";
+        QVERIFY(other.put(recolored));
+        QVERIFY(w.store.reloadIfChanged());
+        w.type("Office");
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTRY_COMPARE(w.store.list(id)->name, QString("Office"));
+        QCOMPARE(w.store.list(id)->color, QString("red"));
+    }
+
+    void deleteCompletedAsksWithoutPromisingACount() {
+        QmlWindow w;
+        const qint64 list = addList(w.store, "Work");
+        const qint64 id = add(w.store, list, "Checked");
+        w.store.complete(id, friday);
+        w.backend.setViewKey("list:" + QString::number(list));
+        QVERIFY(w.open());
+        QVERIFY(QMetaObject::invokeMethod(w.window, "clearCompleted"));
+        QTRY_VERIFY(w.window->property("popupOpen").toBool());
+        QVERIFY(w.find([](QQuickItem *item) { return item->property("text").toString() == "Delete completed"; }));
+        Store other(w.store.path());
+        QVERIFY(other.reopen(id));
+        QTest::keyClick(w.window, Qt::Key_Return);
+        QTRY_VERIFY(!w.window->property("popupOpen").toBool());
+        QVERIFY(w.store.reminder(id));
+        QVERIFY(!w.store.reminder(id)->completed);
+    }
+
     // An alert left on screen answers for the moment it announced. Completed
     // in the window since, a daily reminder has moved on to tomorrow, and a
     // late Complete on the alert must not complete tomorrow's as well.

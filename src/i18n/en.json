@@ -5,6 +5,5 @@
   "Every %n years": { "one": "Every %n year", "other": "Every %n years" },
   "%n reminders are due": { "one": "%n reminder is due", "other": "%n reminders are due" },
   "Deleted %n completed reminders": { "one": "Deleted %n completed reminder", "other": "Deleted %n completed reminders" },
-  "Delete %n completed reminders?": { "one": "Delete %n completed reminder?", "other": "Delete %n completed reminders?" },
   "Its %n reminders are deleted with it. Undo brings them back.": { "one": "Its reminder is deleted with it. Undo brings it back.", "other": "Its %n reminders are deleted with it. Undo brings them back." }
 }

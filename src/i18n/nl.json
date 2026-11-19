@@ -11,6 +11,7 @@
   "2 hours before": "2 uur eerder",
   "30 minutes before": "30 minuten eerder",
   "5 minutes before": "5 minuten eerder",
+  "A repeating reminder needs a date.": "Een terugkerende herinnering heeft een datum nodig.",
   "Add": "Voeg toe",
   "All": "Alles",
   "Back to a reminder of its own": "Weer een eigen herinnering",
@@ -28,10 +29,6 @@
   "Date Created": "Aanmaakdatum",
   "Dates": "Datums",
   "Delete": "Verwijder",
-  "Delete %n completed reminders?": {
-    "one": "%n voltooide herinnering verwijderen?",
-    "other": "%n voltooide herinneringen verwijderen?"
-  },
   "Delete completed": "Verwijder voltooide",
   "Delete Completed": "Verwijder voltooide",
   "Delete List": "Verwijder lijst",
@@ -76,6 +73,7 @@
   "High": "Hoog",
   "In a Week": "Over een week",
   "In an Hour": "Over een uur",
+  "It was deleted in another window or by a command, so the change was not saved.": "De herinnering is in een ander venster of met een opdracht verwijderd. De wijziging is niet opgeslagen.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "De herinnering wordt mee verwijderd. Met Ongedaan maken komt die terug.",
     "other": "De %n herinneringen worden mee verwijderd. Met Ongedaan maken komen ze terug."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Gesorteerd op %1",
   "Tags": "Tags",
   "The desktop did not accept a notification: %1": "Het bureaublad accepteerde een melding niet: %1",
+  "The reminder’s list, section, or parent has changed.": "De lijst, sectie of bovenliggende herinnering is gewijzigd.",
   "There are no completed reminders to delete": "Er zijn geen voltooide herinneringen om te verwijderen",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Deze lijst is gesorteerd op %1. Druk op S voor Handmatige volgorde om te herschikken.",
   "This sheet": "Dit overzicht",

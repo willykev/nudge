@@ -76,16 +76,22 @@ class Store : public QObject {
     Q_OBJECT
 
 public:
+    enum Snapshot { Cached, Latest };
+
     // Groups the changes made while it is alive into one undo step.
     class Tx {
     public:
-        explicit Tx(Store *store, const QString &mergeKey = {}) : m_store(store) { store->begin(mergeKey); }
-        ~Tx() { m_store->commit(); }
+        explicit Tx(Store *store, const QString &mergeKey = {}, Snapshot snapshot = Cached)
+            : m_store(store), m_ready(store->begin(mergeKey, snapshot)) {}
+        ~Tx() { if (m_store) m_store->commit(); }
         Tx(const Tx &) = delete;
         Tx &operator=(const Tx &) = delete;
+        explicit operator bool() const { return m_ready; }
+        bool commit();
 
     private:
         Store *m_store;
+        bool m_ready;
     };
 
     explicit Store(const QString &path = {}, QObject *parent = nullptr);
@@ -109,7 +115,7 @@ public:
     // A transaction reaches the disk whole or not at all. When a write in it
     // fails, failed() says why, the rest is skipped, and memory and undo are
     // left as they were; commit() then returns false.
-    void begin(const QString &mergeKey = {});
+    bool begin(const QString &mergeKey = {}, Snapshot snapshot = Cached);
     bool commit();
     // Each returns the id, or 0 when it could not be saved. An open reminder
     // reopens a completed parent, in the same step.
@@ -117,14 +123,16 @@ public:
     qint64 put(TaskList list);
     qint64 put(Section section);
     void removeReminder(qint64 id); // and its subtasks
-    void removeReminders(const QVector<qint64> &ids); // exactly these
+    qsizetype removeReminders(const QVector<qint64> &ids); // keep a parent if any child stays
+    void removeEmptyDraft(qint64 id);
+    void cleanUpDrafts(qint64 olderThan);
     void removeList(qint64 id);     // and everything in it
     void removeSection(qint64 id);  // its reminders stay in the list
 
     // Completing a repeating reminder leaves a completed copy behind and
     // moves the reminder to its next date, which is returned.
-    QDate complete(qint64 id, const QDateTime &now);
-    void reopen(qint64 id); // and its parent, if that was completed
+    QDate complete(qint64 id, const QDateTime &now, bool *completed = nullptr);
+    bool reopen(qint64 id); // and its parent, if that was completed
 
     // Undo and redo leave alone what another process has changed since:
     // the steps that would write over it are forgotten, and the rest stay.
@@ -156,6 +164,7 @@ private:
     template <typename T> struct Delta {
         qint64 id = 0;
         std::optional<T> before, after;
+        bool keepOnUndo = false;
     };
     struct UndoEntry {
         QString mergeKey;
@@ -170,7 +179,9 @@ private:
     bool run(const QString &sql);
     void fail(const QString &message);
     void prepare();
-    bool load();
+    bool load(bool locked = false);
+    std::optional<bool> readChanges(bool locked = false);
+    bool migrateSchedule();
     void repair();
     qint64 pragma(const char *name);
     qint64 dataVersion();
@@ -210,6 +221,9 @@ private:
     bool m_open = false;
     bool m_recording = true;
     bool m_broken = false; // a write in the transaction under way failed
+    bool m_current = false; // the locked snapshot includes every outside write
+    bool m_externalChange = false;
+    bool m_undoChanged = false;
     int m_depth = 0;
     qint64 m_dataVersion = 0;
 

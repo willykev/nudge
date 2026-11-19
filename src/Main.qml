@@ -206,7 +206,7 @@ ApplicationWindow {
             say(qsTr("There are no completed reminders to delete"))
             return
         }
-        ask.confirm(qsTr("Delete %n completed reminders?", "", ids.length), qsTr("Undo brings them back."),
+        ask.confirm(qsTr("Delete completed"), qsTr("Undo brings them back."),
                     qsTr("Delete"), () => backend.clearCompleted(ids))
     }
     function newSection() {

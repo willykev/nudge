@@ -11,6 +11,7 @@
   "2 hours before": "2 horas antes",
   "30 minutes before": "30 minutos antes",
   "5 minutes before": "5 minutos antes",
+  "A repeating reminder needs a date.": "Um lembrete recorrente precisa de uma data.",
   "Add": "Adicionar",
   "All": "Todos",
   "Back to a reminder of its own": "Voltar a ser um lembrete independente",
@@ -28,10 +29,6 @@
   "Date Created": "Data de criação",
   "Dates": "Datas",
   "Delete": "Excluir",
-  "Delete %n completed reminders?": {
-    "one": "Excluir %n lembrete concluído?",
-    "other": "Excluir %n lembretes concluídos?"
-  },
   "Delete completed": "Excluir concluídos",
   "Delete Completed": "Excluir concluídos",
   "Delete List": "Excluir lista",
@@ -76,6 +73,7 @@
   "High": "Alta",
   "In a Week": "Em uma semana",
   "In an Hour": "Em uma hora",
+  "It was deleted in another window or by a command, so the change was not saved.": "O lembrete foi excluído em outra janela ou por um comando. A alteração não foi salva.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "Seu lembrete é excluído junto com ela. Desfazer o restaura.",
     "other": "Seus %n lembretes são excluídos junto com ela. Desfazer os restaura."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Ordenado por %1",
   "Tags": "Etiquetas",
   "The desktop did not accept a notification: %1": "A área de trabalho não aceitou uma notificação: %1",
+  "The reminder’s list, section, or parent has changed.": "A lista, a seção ou o lembrete principal foi alterado.",
   "There are no completed reminders to delete": "Não há lembretes concluídos para excluir",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Esta lista está ordenada por %1. Pressione S para Ordem manual e reorganizá-la.",
   "This sheet": "Esta folha",

@@ -11,6 +11,7 @@
   "2 hours before": "2 timer før",
   "30 minutes before": "30 minutter før",
   "5 minutes before": "5 minutter før",
+  "A repeating reminder needs a date.": "En gentaget påmindelse skal have en dato.",
   "Add": "Tilføj",
   "All": "Alle",
   "Back to a reminder of its own": "Tilbage til en selvstændig påmindelse",
@@ -28,10 +29,6 @@
   "Date Created": "Oprettelsesdato",
   "Dates": "Datoer",
   "Delete": "Slet",
-  "Delete %n completed reminders?": {
-    "one": "Slet %n fuldført påmindelse?",
-    "other": "Slet %n fuldførte påmindelser?"
-  },
   "Delete completed": "Slet fuldførte",
   "Delete Completed": "Slet fuldførte",
   "Delete List": "Slet liste",
@@ -76,6 +73,7 @@
   "High": "Høj",
   "In a Week": "Om en uge",
   "In an Hour": "Om en time",
+  "It was deleted in another window or by a command, so the change was not saved.": "Den blev slettet i et andet vindue eller af en kommando, så ændringen blev ikke gemt.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "Dens påmindelse slettes sammen med den. Fortryd henter den tilbage.",
     "other": "Dens %n påmindelser slettes sammen med den. Fortryd henter dem tilbage."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Sorteret efter %1",
   "Tags": "Tags",
   "The desktop did not accept a notification: %1": "Skrivebordet accepterede ikke en notifikation: %1",
+  "The reminder’s list, section, or parent has changed.": "Påmindelsens liste, sektion eller overordnede påmindelse er ændret.",
   "There are no completed reminders to delete": "Der er ingen fuldførte påmindelser at slette",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Denne liste er sorteret efter %1. Tryk på S for Manuel rækkefølge for at ændre den.",
   "This sheet": "Dette ark",

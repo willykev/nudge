@@ -11,6 +11,7 @@
   "2 hours before": "2 ore prima",
   "30 minutes before": "30 minuti prima",
   "5 minutes before": "5 minuti prima",
+  "A repeating reminder needs a date.": "Un promemoria ricorrente richiede una data.",
   "Add": "Aggiungi",
   "All": "Tutti",
   "Back to a reminder of its own": "Torna a promemoria indipendente",
@@ -28,10 +29,6 @@
   "Date Created": "Data di creazione",
   "Dates": "Date",
   "Delete": "Elimina",
-  "Delete %n completed reminders?": {
-    "one": "Eliminare %n promemoria completato?",
-    "other": "Eliminare %n promemoria completati?"
-  },
   "Delete completed": "Elimina completati",
   "Delete Completed": "Elimina completati",
   "Delete List": "Elimina lista",
@@ -76,6 +73,7 @@
   "High": "Alta",
   "In a Week": "Tra una settimana",
   "In an Hour": "Tra un’ora",
+  "It was deleted in another window or by a command, so the change was not saved.": "Il promemoria è stato eliminato in un’altra finestra o da un comando. La modifica non è stata salvata.",
   "Its %n reminders are deleted with it. Undo brings them back.": {
     "one": "Il suo promemoria viene eliminato con essa. Annulla lo ripristina.",
     "other": "I suoi %n promemoria vengono eliminati con essa. Annulla li ripristina."
@@ -159,6 +157,7 @@
   "Sorted by %1": "Ordinati per %1",
   "Tags": "Tag",
   "The desktop did not accept a notification: %1": "Il desktop non ha accettato una notifica: %1",
+  "The reminder’s list, section, or parent has changed.": "La lista, la sezione o il promemoria principale è cambiato.",
   "There are no completed reminders to delete": "Non ci sono promemoria completati da eliminare",
   "This list is sorted by %1. Press S for Manual Order to rearrange it.": "Questa lista è ordinata per %1. Premi S per Ordine manuale e riordinarla.",
   "This sheet": "Questa scheda",

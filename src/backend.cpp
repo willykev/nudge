@@ -66,15 +66,7 @@ Backend::Backend(Store *store, QObject *parent)
     // A reminder left without a title is one the app never got to finish
     // (it was killed mid-word), not something to be reminded of. One touched
     // in the last few minutes may be another window's, still being typed.
-    const qint64 settled = now().toSecsSinceEpoch() - 10 * 60;
-    QVector<qint64> blank;
-    for (const Reminder &r : m_store->reminders())
-        if (r.title.isEmpty() && r.notes.isEmpty() && r.modifiedAt < settled && m_store->childrenOf(r.id).isEmpty())
-            blank.append(r.id);
-    if (!blank.isEmpty()) {
-        m_store->removeReminders(blank);
-        m_store->clearUndo();
-    }
+    m_store->cleanUpDrafts(now().toSecsSinceEpoch() - 10 * 60);
 
     m_view = View::fromKey(m_store->meta("view"));
     refresh(true);
@@ -552,6 +544,11 @@ qint64 Backend::addReminder() {
         return 0;
     // One the details pane was filling in is done with first.
     settleDraft();
+    m_beforeDraft = m_selectedId;
+    m_draftKey = QString("draft:%1").arg(++m_drafts);
+    Store::Tx tx(m_store, m_draftKey, Store::Latest);
+    if (!tx)
+        return 0;
     // A reminder cannot start out finished, or as a search result.
     if (m_view.kind == View::Completed || m_view.kind == View::Search)
         setViewKey("list:" + QString::number(m_store->defaultListId()));
@@ -580,30 +577,24 @@ qint64 Backend::addReminder() {
         parent && parent->completed && parent->listId == selected->listId)
         selected = *parent;
 
-    m_beforeDraft = m_selectedId;
-    m_draftKey = QString("draft:%1").arg(++m_drafts);
-    qint64 id = 0;
-    {
-        Store::Tx tx(m_store, m_draftKey);
-        // In a list it lands right below the selected reminder, as its
-        // sibling; elsewhere at the end of its list.
-        if (selected && m_view.isTree() && selected->listId == r.listId) {
-            r.parentId = selected->parentId;
-            r.sectionId = selected->sectionId;
+    // In a list it lands right below the selected reminder, as its
+    // sibling; elsewhere at the end of its list.
+    if (selected && m_view.isTree() && selected->listId == r.listId) {
+        r.parentId = selected->parentId;
+        r.sectionId = selected->sectionId;
+        r.position = positionAfter(*selected);
+        if (r.position - selected->position < 1e-6) {
+            spread(r.listId);
+            selected = *m_store->reminder(selected->id);
             r.position = positionAfter(*selected);
-            if (r.position - selected->position < 1e-6) {
-                spread(r.listId);
-                selected = *m_store->reminder(selected->id);
-                r.position = positionAfter(*selected);
-            }
-        } else {
-            r.position = m_store->endPosition(r.listId);
         }
-        id = m_store->put(r);
-        // Known before the transaction ends and the view refreshes, so
-        // selecting the new row does not close its undo step.
-        m_draftId = id;
+    } else {
+        r.position = m_store->endPosition(r.listId);
     }
+    // Known before the transaction ends and the view refreshes, so
+    // selecting the new row does not close its undo step.
+    m_draftId = m_store->put(r);
+    const qint64 id = tx.commit() ? m_draftId : 0;
     emit draftChanged();
     setSelectedId(id);
     return id;
@@ -634,8 +625,7 @@ void Backend::commitTitle(qint64 id, const QString &text) {
         // already moved it on.
         const bool selected = m_selectedId == id;
         m_store->discardLast(key);
-        if (m_store->reminder(id))
-            m_store->removeReminder(id);
+        m_store->removeEmptyDraft(id);
         if (selected && m_store->reminder(m_beforeDraft) && m_model->rowOf(m_beforeDraft) >= 0)
             setSelectedId(m_beforeDraft);
         return;
@@ -692,8 +682,7 @@ void Backend::settleDraft() {
         return;
     }
     m_store->discardLast(m_draftKey);
-    if (m_store->reminder(id))
-        m_store->removeReminder(id);
+    m_store->removeEmptyDraft(id);
 }
 
 QString Backend::quickPreview(const QString &text) const {
@@ -807,6 +796,9 @@ void Backend::remove(qint64 id) {
 }
 
 void Backend::indent(qint64 id) {
+    Store::Tx tx(m_store, stepKey(id), Store::Latest);
+    if (!tx)
+        return;
     const Reminder *r = m_store->reminder(id);
     if (!r || r->parentId || !m_view.isTree())
         return;
@@ -844,7 +836,6 @@ void Backend::indent(qint64 id) {
     const QString parentTitle = parent->title;
 
     {
-        Store::Tx tx(m_store, stepKey(id));
         if (reopen)
             m_store->reopen(parentId);
         m_store->put(moved);
@@ -856,11 +847,14 @@ void Backend::indent(qint64 id) {
             m_store->put(child);
         }
     }
-    if (reopen)
+    if (tx.commit() && reopen)
         emit notice(tr("Reopened “%1”: it has a subtask to do").arg(parentTitle));
 }
 
 void Backend::outdent(qint64 id) {
+    Store::Tx tx(m_store, stepKey(id), Store::Latest);
+    if (!tx)
+        return;
     const Reminder *r = m_store->reminder(id);
     if (!r || !r->parentId)
         return;
@@ -872,11 +866,13 @@ void Backend::outdent(qint64 id) {
     } else {
         moved.position = m_store->endPosition(r->listId);
     }
-    Store::Tx tx(m_store, stepKey(id));
     m_store->put(moved);
 }
 
 void Backend::moveReminder(qint64 id, int delta) {
+    Store::Tx tx(m_store, {}, Store::Latest);
+    if (!tx)
+        return;
     const Reminder *found = m_store->reminder(id);
     const TaskList *list = found ? m_store->list(found->listId) : nullptr;
     if (!found || !list || delta == 0)
@@ -909,7 +905,6 @@ void Backend::moveReminder(qint64 id, int delta) {
     if (to >= 0 && to < siblings.size()) {
         const Reminder neighbor = *m_store->reminder(siblings[to]);
         moved.position = delta > 0 ? positionAfter(neighbor) : positionBefore(neighbor);
-        Store::Tx tx(m_store);
         if (std::abs(moved.position - neighbor.position) < 1e-6) {
             spread(r.listId);
             const Reminder again = *m_store->reminder(neighbor.id);
@@ -943,6 +938,9 @@ void Backend::moveReminder(qint64 id, int delta) {
 }
 
 void Backend::moveToList(qint64 id, qint64 listId) {
+    Store::Tx tx(m_store, stepKey(id), Store::Latest);
+    if (!tx)
+        return;
     const Reminder *existing = m_store->reminder(id);
     const TaskList *list = m_store->list(listId);
     if (!existing || !list || existing->listId == listId)
@@ -956,7 +954,6 @@ void Backend::moveToList(qint64 id, qint64 listId) {
     moved.position = position;
     const QVector<qint64> children = m_store->childrenOf(id);
     {
-        Store::Tx tx(m_store, stepKey(id));
         m_store->put(moved);
         for (qint64 childId : children) {
             Reminder child = *m_store->reminder(childId);
@@ -966,10 +963,14 @@ void Backend::moveToList(qint64 id, qint64 listId) {
             m_store->put(child);
         }
     }
-    emit notice(tr("Moved to %1").arg(name));
+    if (tx.commit())
+        emit notice(tr("Moved to %1").arg(name));
 }
 
 void Backend::moveToSection(qint64 id, qint64 sectionId) {
+    Store::Tx tx(m_store, stepKey(id), Store::Latest);
+    if (!tx)
+        return;
     const Reminder *existing = m_store->reminder(id);
     const Section *section = m_store->section(sectionId);
     // Only a section of the reminder's own list will do, whatever a menu offered.
@@ -980,7 +981,6 @@ void Backend::moveToSection(qint64 id, qint64 sectionId) {
     moved.parentId = 0;
     moved.position = m_store->endPosition(moved.listId);
     const QVector<qint64> children = m_store->childrenOf(id);
-    Store::Tx tx(m_store, stepKey(id));
     m_store->put(moved);
     for (qint64 childId : children) {
         Reminder child = *m_store->reminder(childId);
@@ -1066,6 +1066,9 @@ bool Backend::setTime(qint64 id, const QString &text) {
 }
 
 void Backend::setRepeat(qint64 id, const QString &unit, int interval) {
+    Store::Tx tx(m_store, stepKey(id, "repeat:" + QString::number(id)), Store::Latest);
+    if (!tx)
+        return;
     Repeat repeat;
     repeat.unit = Repeat::Unit(qMax(0, int(repeatUnits.indexOf(unit))));
     repeat.interval = qBound(1, interval, 999);
@@ -1282,25 +1285,26 @@ QVariantList Backend::completedIds() const {
 }
 
 void Backend::clearCompleted(const QVariantList &asked) {
+    Store::Tx tx(m_store, {}, Store::Latest);
+    if (!tx)
+        return;
     QSet<qint64> wanted;
     for (const QVariant &id : asked)
         wanted.insert(id.toLongLong());
     QVector<qint64> ids = completedInView();
     ids.removeIf([&wanted](qint64 id) { return !wanted.contains(id); });
-    if (ids.isEmpty()) {
+    const auto count = m_store->removeReminders(ids);
+    if (!tx.commit())
+        return;
+    if (!count) {
         emit notice(tr("There are no completed reminders to delete"));
         return;
     }
-    m_store->removeReminders(ids);
-    emit notice(tr("Deleted %n completed reminders", "", ids.size()));
+    emit notice(tr("Deleted %n completed reminders", "", count));
 }
 
 void Backend::clearCompleted() {
-    const QVector<qint64> ids = completedInView();
-    if (ids.isEmpty())
-        return;
-    m_store->removeReminders(ids);
-    emit notice(tr("Deleted %n completed reminders", "", ids.size()));
+    clearCompleted(completedIds());
 }
 
 // ---- Undo, and reminders in the background -----------------------------------------
