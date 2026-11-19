@@ -18,9 +18,12 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSet>
 #include <QSocketNotifier>
 #include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QTimeZone>
 #include <algorithm>
 #include <csignal>
 #include <cstdio>
@@ -124,7 +127,13 @@ QString isoTime(int minutes) {
 }
 
 QJsonValue isoMoment(qint64 seconds) {
-    return seconds ? QJsonValue(QDateTime::fromSecsSinceEpoch(seconds).toString(Qt::ISODate)) : QJsonValue();
+    return seconds ? QJsonValue(QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::UTC).toString(Qt::ISODate))
+                   : QJsonValue();
+}
+
+qint64 readMoment(const QJsonObject &entry, const QString &key) {
+    const QDateTime time = QDateTime::fromString(entry.value(key).toString(), Qt::ISODate);
+    return time.isValid() ? time.toSecsSinceEpoch() : 0;
 }
 
 QJsonObject toJson(const Store &store, const Reminder &r) {
@@ -149,7 +158,8 @@ QJsonObject toJson(const Store &store, const Reminder &r) {
             {"tags", QJsonArray::fromStringList(r.tags)},
             {"completed", r.completed},
             {"completedAt", isoMoment(r.completedAt)},
-            {"createdAt", isoMoment(r.createdAt)}};
+            {"createdAt", isoMoment(r.createdAt)},
+            {"snoozeUntil", isoMoment(r.snoozeUntil)}};
 }
 
 QString toText(const Store &store, const Reminder &r) {
@@ -691,6 +701,9 @@ int exportAll(const QStringList &arguments) {
     Store store;
     if (!ready(store))
         return 1;
+    const QString path = command.arguments().value(0);
+    if (!path.isEmpty() && Store::isDatabaseFile(store.path(), path))
+        return fail("Choose a backup path separate from the reminders database.");
     QJsonArray lists, reminders;
     for (const TaskList &entry : store.lists()) {
         // Names, as every export has had them, and beside them the ids, which
@@ -705,20 +718,28 @@ int exportAll(const QStringList &arguments) {
                              {"sort", entry.sort},   {"sections", sections},   {"sectionIds", sectionIds}};
     }
     QVector<const Reminder *> ordered;
+    QSet<qint64> namedParents;
     for (const Reminder &r : store.reminders())
-        ordered << &r;
+        if (r.hasContent() && r.parentId)
+            namedParents.insert(r.parentId);
+    for (const Reminder &r : store.reminders())
+        if (r.hasContent() || namedParents.contains(r.id))
+            ordered << &r;
     std::sort(ordered.begin(), ordered.end(), [](const Reminder *a, const Reminder *b) {
         return a->listId != b->listId ? a->listId < b->listId
                : a->position != b->position ? a->position < b->position
                                             : a->id < b->id;
     });
-    for (const Reminder *r : ordered)
-        reminders << toJson(store, *r);
+    for (const Reminder *r : ordered) {
+        QJsonObject entry = toJson(store, *r);
+        if (r->title.trimmed().isEmpty())
+            entry["title"] = QCoreApplication::translate("Store", "Untitled reminder");
+        reminders << entry;
+    }
     const QJsonObject document{{"nudge", 1},
-                               {"exportedAt", QDateTime::currentDateTime().toString(Qt::ISODate)},
+                               {"exportedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
                                {"lists", lists},
                                {"reminders", reminders}};
-    const QString path = command.arguments().value(0);
     // To standard output it is JSON, whether --json says so or not.
     if (path.isEmpty()) {
         print(document);
@@ -729,8 +750,9 @@ int exportAll(const QStringList &arguments) {
     // Readable by its owner alone, as the reminders it holds are, whatever
     // file it replaces.
     QSaveFile file(path);
+    const QByteArray json = QJsonDocument(document).toJson();
     if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
-        file.write(QJsonDocument(document).toJson()) < 0 || !file.commit())
+        file.write(json) != json.size() || !file.commit())
         return fail("Could not write " + path + ": " + file.errorString());
     if (command.wantsJson())
         print({{"exported", int(reminders.size())}, {"file", QFileInfo(path).absoluteFilePath()}});
@@ -750,15 +772,48 @@ int importAll(const QStringList &arguments) {
         return fail(path.isEmpty() ? QString("Name the file to import.") : "Could not read " + path + ".");
     QJsonParseError problem;
     const QJsonObject document = QJsonDocument::fromJson(file.readAll(), &problem).object();
-    if (problem.error != QJsonParseError::NoError || !document.contains("reminders"))
+    if (problem.error != QJsonParseError::NoError || !document.value("reminders").isArray() ||
+        (document.contains("lists") && !document.value("lists").isArray()))
         return fail(path + " is not a Nudge export.");
+
+    const QJsonArray imported = document.value("reminders").toArray();
+    QHash<qint64, qint64> parentOf;
+    QSet<QString> incomingNames;
+    for (const QJsonValue &value : imported) {
+        const QJsonObject entry = value.toObject();
+        if (entry.value("title").toString().trimmed().isEmpty())
+            return fail("Every imported reminder needs a title.");
+        const QJsonValue idValue = entry.value("id"), parentValue = entry.value("parent");
+        const qint64 id = idValue.toInteger(-1);
+        const qint64 parent = parentValue.isUndefined() || parentValue.isNull() ? 0 : parentValue.toInteger(-1);
+        if ((!idValue.isUndefined() && !idValue.isNull() && id <= 0) || parent < 0 ||
+            (id > 0 && parentOf.contains(id)))
+            return fail("The backup has invalid or duplicate reminder ids.");
+        if (id > 0)
+            parentOf.insert(id, parent);
+        incomingNames.insert(entry.value("list").toString());
+    }
+    for (const QJsonValue &value : imported) {
+        const qint64 parent = value.toObject().value("parent").toInteger();
+        if (parent && parentOf.value(parent, -1) != 0)
+            return fail("A subtask in the backup does not name a top-level reminder.");
+    }
+    for (const QJsonValue &value : document.value("lists").toArray()) {
+        const QJsonObject entry = value.toObject();
+        if (entry.value("name").toString().trimmed().isEmpty() ||
+            (entry.contains("sections") && !entry.value("sections").isArray()))
+            return fail("The backup has an invalid list.");
+        incomingNames.insert(entry.value("name").toString());
+    }
 
     Store store;
     if (!ready(store))
         return 1;
     Failures failures(store);
     // One step for everything, committed before the count is told.
-    std::optional<Store::Tx> tx(std::in_place, &store);
+    Store::Tx tx(&store, {}, Store::Latest);
+    if (!tx)
+        return failures.report("Nothing was imported");
     // What was here before the import. An export from Nudge 0.1.4 or later
     // gives each list and section an id, and two it holds apart stay apart
     // here, whatever they are called: each is matched to one that was here
@@ -771,6 +826,7 @@ int importAll(const QStringList &arguments) {
     for (const Section &section : store.sections())
         sectionsBefore.insert(section.id);
     QHash<qint64, qint64> listIds, sectionIds;
+    QHash<QString, qint64> legacyLists;
     QSet<qint64> claimed, claimedSections;
     // The lists the import makes, the only ones it may give the file's color
     // and order: nothing already here is changed.
@@ -778,14 +834,19 @@ int importAll(const QStringList &arguments) {
     auto listFor = [&](qint64 oldId, const QString &name) -> qint64 {
         if (oldId && listIds.contains(oldId))
             return listIds.value(oldId);
+        if (!oldId && legacyLists.contains(name))
+            return legacyLists.value(name);
         if (name.isEmpty() && !oldId)
             return store.defaultListId();
         qint64 id = 0;
         for (const Qt::CaseSensitivity sensitivity : {Qt::CaseSensitive, Qt::CaseInsensitive}) {
             for (const TaskList &list : store.lists()) {
                 const bool before = listsBefore.contains(list.id);
-                if (oldId ? !before || claimed.contains(list.id)
-                          : !before && sensitivity == Qt::CaseInsensitive)
+                if (!before || claimed.contains(list.id))
+                    continue;
+                // The first spelling in an export must not take a list
+                // another spelling would match exactly.
+                if (sensitivity == Qt::CaseInsensitive && incomingNames.contains(list.name))
                     continue;
                 if (list.name.compare(name, sensitivity) == 0) {
                     id = list.id;
@@ -803,10 +864,11 @@ int importAll(const QStringList &arguments) {
             id = store.put(created);
             made.insert(id);
         }
-        if (oldId) {
+        if (oldId)
             listIds.insert(oldId, id);
-            claimed.insert(id);
-        }
+        else
+            legacyLists.insert(name, id);
+        claimed.insert(id);
         return id;
     };
     auto sectionIn = [&](qint64 listId, qint64 oldId, const QString &name) -> qint64 {
@@ -849,22 +911,33 @@ int importAll(const QStringList &arguments) {
         }
         const QJsonArray sections = entry.value("sections").toArray(), ids = entry.value("sectionIds").toArray();
         for (qsizetype i = 0; i < sections.size(); ++i)
-            sectionIn(listId, ids.at(i).toInteger(), sections.at(i).toString());
+            sectionIn(listId, i < ids.size() ? ids.at(i).toInteger() : 0, sections.at(i).toString());
     }
 
     // Parents first, so subtasks can find the ids their parents were given.
     QHash<qint64, qint64> newIds;
+    QHash<qint64, double> positions;
+    for (const Reminder &r : store.reminders())
+        positions[r.listId] = qMax(positions.value(r.listId), r.position);
     int added = 0;
     for (const bool subtasks : {false, true}) {
-        for (const QJsonValue &value : document.value("reminders").toArray()) {
+        for (const QJsonValue &value : imported) {
             const QJsonObject entry = value.toObject();
             const qint64 oldParent = entry.value("parent").toInteger();
             if ((oldParent != 0) != subtasks)
                 continue;
             Reminder r;
-            r.listId = listFor(entry.value("listId").toInteger(), entry.value("list").toString());
-            r.sectionId = sectionIn(r.listId, entry.value("sectionId").toInteger(), entry.value("section").toString());
-            r.parentId = newIds.value(oldParent);
+            if (oldParent) {
+                r.parentId = newIds.value(oldParent);
+                const Reminder *parent = store.reminder(r.parentId);
+                if (!parent)
+                    continue; // the failed parent write will roll back the import
+                r.listId = parent->listId;
+                r.sectionId = parent->sectionId;
+            } else {
+                r.listId = listFor(entry.value("listId").toInteger(), entry.value("list").toString());
+                r.sectionId = sectionIn(r.listId, entry.value("sectionId").toInteger(), entry.value("section").toString());
+            }
             r.title = entry.value("title").toString();
             r.notes = entry.value("notes").toString();
             r.url = entry.value("url").toString();
@@ -879,24 +952,22 @@ int importAll(const QStringList &arguments) {
             for (const QJsonValue &tag : entry.value("tags").toArray())
                 r.tags << tag.toString();
             r.completed = entry.value("completed").toBool();
-            r.completedAt = QDateTime::fromString(entry.value("completedAt").toString(), Qt::ISODate).toSecsSinceEpoch();
-            r.createdAt = QDateTime::fromString(entry.value("createdAt").toString(), Qt::ISODate).toSecsSinceEpoch();
-            if (r.completedAt < 0)
-                r.completedAt = 0;
-            if (r.createdAt < 0)
-                r.createdAt = 0;
-            r.position = store.endPosition(r.listId);
+            r.completedAt = readMoment(entry, "completedAt");
+            r.createdAt = readMoment(entry, "createdAt");
+            r.snoozeUntil = r.completed || !r.due.isValid() ? 0 : readMoment(entry, "snoozeUntil");
+            r.position = ++positions[r.listId];
             // A done reminder has no open subtasks, so an open one reopens
             // the parent it came with.
             if (const Reminder *parent = store.reminder(r.parentId); !r.completed && parent && parent->completed)
                 store.reopen(r.parentId);
             const qint64 id = store.put(r);
-            newIds.insert(entry.value("id").toInteger(), id);
+            const qint64 oldId = entry.value("id").toInteger();
+            if (oldId)
+                newIds.insert(oldId, id);
             added += id != 0;
         }
     }
-    tx.reset();
-    if (failures.any())
+    if (!tx.commit() || failures.any())
         return failures.report("Nothing was imported");
     if (command.wantsJson())
         print({{"imported", added}});
@@ -936,7 +1007,7 @@ int background(const QStringList &arguments) {
     return 0;
 }
 
-// As Hype does: one shared copy, linked into Claude Code, found directly by Codex.
+// One shared copy of the skill, also linked into the older skills directory.
 int skill(const QStringList &arguments) {
     Command command("skill", "Print the agent skill, or install it for your coding agents with: skill install.");
     command.parser.addPositionalArgument("install", "Copy to ~/.agents/skills/nudge and link into ~/.claude/skills",
@@ -960,26 +1031,50 @@ int skill(const QStringList &arguments) {
     const QDir home = QDir::home();
     const QString directory = home.filePath(".agents/skills/nudge");
     QSaveFile file(directory + "/SKILL.md");
-    if (!QDir().mkpath(directory) || !file.open(QIODevice::WriteOnly) || file.write(text) < 0 || !file.commit())
+    if (!QDir().mkpath(directory) || !file.open(QIODevice::WriteOnly) || file.write(text) != text.size())
         return fail("Could not write " + file.fileName());
-    if (!command.wantsJson())
-        print(stdout, "Installed " + file.fileName());
-    QJsonValue linked; // stays null without Claude Code
-    if (home.exists(".claude")) {
-        const QString link = home.filePath(".claude/skills/nudge");
-        const QFileInfo existing(link);
-        if (existing.isSymLink())
+
+    const QString link = home.exists(".claude") ? home.filePath(".claude/skills/nudge") : QString();
+    bool linkedNow = false;
+    QString previous;
+    std::optional<QTemporaryDir> holding;
+    auto restore = qScopeGuard([&] {
+        if (linkedNow)
             QFile::remove(link);
-        else if (existing.exists())
-            return fail(link + " exists and is not a link; leaving it alone.");
-        if (!home.mkpath(".claude/skills") || !QFile::link("../../.agents/skills/nudge", link))
+        if (!previous.isEmpty())
+            QFile::rename(previous, link);
+    });
+    if (!link.isEmpty()) {
+        if (!home.mkpath(".claude/skills"))
             return fail("Could not link " + link);
-        if (!command.wantsJson())
-            print(stdout, "Linked " + link);
-        linked = link;
+        const QFileInfo existing(link);
+        const QString canonical = QFileInfo(directory).canonicalFilePath();
+        const QDir parent(existing.dir().canonicalPath());
+        if (existing.canonicalFilePath() != canonical) {
+            if (existing.isSymLink()) {
+                holding.emplace(parent.filePath(".nudge-skill.XXXXXX"));
+                if (!holding->isValid() || !QFile::rename(link, holding->filePath("previous")))
+                    return fail("Could not replace the link " + link);
+                previous = holding->filePath("previous");
+            } else if (existing.exists()) {
+                return fail(link + " exists and is not a link; leaving it alone.");
+            }
+            const QString target = parent.relativeFilePath(canonical);
+            if (!QFile::link(target, link))
+                return fail("Could not link " + link);
+            linkedNow = true;
+        }
     }
-    if (command.wantsJson())
-        print({{"installed", file.fileName()}, {"linked", linked}});
+    if (!file.commit())
+        return fail("Could not write " + file.fileName());
+    restore.dismiss();
+    if (command.wantsJson()) {
+        print({{"installed", file.fileName()}, {"linked", link.isEmpty() ? QJsonValue() : QJsonValue(link)}});
+    } else {
+        print(stdout, "Installed " + file.fileName());
+        if (!link.isEmpty())
+            print(stdout, "Linked " + link);
+    }
     return 0;
 }
 

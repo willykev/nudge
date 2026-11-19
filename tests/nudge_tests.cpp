@@ -16,6 +16,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QTimeZone>
 #include <QtTest>
 #include <array>
 #include <csignal>
@@ -2881,6 +2882,197 @@ private slots:
         ran = cliRun(path, {"skill", "--json"});
         QCOMPARE(ran.code, 0);
         QVERIFY(cliJson(ran).value("skill").toString().startsWith("---\nname: nudge\n"));
+    }
+
+    void exportRefusesTheDatabaseAndItsAliases() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db");
+        Store store(path);
+        const qint64 id = add(store, addList(store, "Home"), "Keep this");
+        const QString alias = dir.filePath("alias.json"), hardLink = dir.filePath("hard.json");
+        QVERIFY(QFile::link(path, alias));
+        QCOMPARE(::link(QFile::encodeName(path).constData(), QFile::encodeName(hardLink).constData()), 0);
+        for (const auto &destination : {path, alias, hardLink, path + "-wal", path + "-shm"})
+            QCOMPARE(cliRun(path, {"export", destination, "--json"}).code, 1);
+        const Store disk(path);
+        QVERIFY(disk.isOpen());
+        QCOMPARE(disk.reminder(id)->title, QString("Keep this"));
+        QVERIFY(QFileInfo(alias).isSymLink());
+    }
+
+    void backupsKeepTheInstantsOfHistoryAndSnoozes() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db"), copy = dir.filePath("restored.db");
+        const auto instant = QDateTime::fromString("2026-02-01T23:30:00-07:00", Qt::ISODate);
+        const auto snooze = instant.addDays(1);
+        {
+            Store store(path);
+            const auto list = addList(store, "Home");
+            Reminder first;
+            first.listId = list;
+            first.title = "Call";
+            first.due = instant.date();
+            first.createdAt = instant.toSecsSinceEpoch();
+            const auto id = store.put(first);
+            store.setAlerted(id, 0, 0, snooze.toSecsSinceEpoch());
+            store.complete(add(store, list, "Done"), instant);
+        }
+        const QString backup = dir.filePath("backup.json");
+        QCOMPARE(cliRun(path, {"export", backup}).code, 0);
+        QFile file(backup);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray json = file.readAll();
+        QVERIFY(json.contains("2026-02-02T06:30:00Z"));
+        QVERIFY(json.contains("2026-02-03T06:30:00Z"));
+        QCOMPARE(cliRun(copy, {"import", backup}).code, 0);
+        Store restored(copy);
+        for (const Reminder &r : restored.reminders()) {
+            if (r.title == "Call") {
+                QCOMPARE(r.createdAt, instant.toSecsSinceEpoch());
+                QCOMPARE(r.snoozeUntil, snooze.toSecsSinceEpoch());
+            } else {
+                QCOMPARE(r.completedAt, instant.toSecsSinceEpoch());
+            }
+        }
+        QCOMPARE(restored.reminders().size(), 2);
+    }
+
+    void importReservesExactListNamesBeforeFoldingCase() {
+        for (const bool withIds : {false, true}) {
+            QTemporaryDir dir;
+            const QString path = dir.filePath("reminders.db"), backup = dir.filePath("input.json");
+            Store existing(path);
+            const qint64 upper = addList(existing, "HOME");
+            QJsonObject home{{"name", "Home"}}, upperHome{{"name", "HOME"}};
+            QJsonObject first{{"title", "Small"}, {"list", "Home"}}, second{{"title", "Big"}, {"list", "HOME"}};
+            if (withIds) {
+                home["id"] = 1;
+                first["listId"] = 1;
+                upperHome["id"] = 2;
+                second["listId"] = 2;
+            }
+            write(backup, QJsonDocument(QJsonObject{{"lists", QJsonArray{home, upperHome}},
+                                                  {"reminders", QJsonArray{first, second}}}).toJson());
+            QCOMPARE(cliRun(path, {"import", backup}).code, 0);
+            Store restored(path);
+            QCOMPARE(restored.lists().size(), 2);
+            for (const Reminder &r : restored.reminders())
+                QCOMPARE(r.listId == upper, r.title == "Big");
+        }
+    }
+
+    void importRejectsBrokenBackupsBeforeChangingLists() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db"), file = dir.filePath("input.json");
+        Store store(path);
+        add(store, addList(store, "Home"), "Keep this");
+        const QVector<QJsonValue> malformed{
+            QJsonObject{{"title", "An object"}},
+            QJsonArray{QJsonObject{{"id", 7}, {"title", "Repeated"}},
+                       QJsonObject{{"id", 7}, {"title", "Another"}}},
+            QJsonArray{QJsonObject{{"parent", 9}, {"title", "Orphan"}}},
+            QJsonArray{QJsonObject{{"title", ""}, {"due", "2026-11-14"}, {"url", "example.test"}}},
+        };
+        for (const QJsonValue &reminders : malformed) {
+            write(file, QJsonDocument(QJsonObject{{"reminders", reminders},
+                {"lists", QJsonArray{QJsonObject{{"name", "Never created"}}}}}).toJson());
+            QCOMPARE(cliRun(path, {"import", file}).code, 1);
+        }
+        const Store disk(path);
+        QCOMPARE(disk.lists().size(), 1);
+        QCOMPARE(disk.reminders().size(), 1);
+    }
+
+    void importAppendsRowsAndOnlyMapsRealParentIds() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("reminders.db"), file = dir.filePath("input.json");
+        Store store(path);
+        const auto list = addList(store, "Home");
+        const auto previous = add(store, list, "Earlier");
+        write(file, R"({"reminders": [
+            {"title": "First", "parent": null, "list": "Home"},
+            {"title": "Parent", "id": 7, "list": "Home"},
+            {"title": "Child", "parent": 7, "list": "Home"},
+            {"title": "Last", "list": "Home"}]})");
+        QCOMPARE(cliRun(path, {"import", file}).code, 0);
+        Store restored(path);
+        QCOMPARE(restored.reminders().size(), 5);
+        QCOMPARE(restored.childrenOf(previous).size(), 0);
+        ViewOptions options;
+        options.now = friday;
+        QCOMPARE(titles(restored, buildRows(restored, View::fromKey("list:" + QString::number(list)), options)),
+                 (QStringList{"Earlier", "First", "Parent", "  Child", "Last"}));
+    }
+
+    void installingAKitChecksBothDestinationsBeforeOverwriting() {
+        QTemporaryDir dir;
+        const QByteArray original = qgetenv("HOME");
+        qputenv("HOME", QFile::encodeName(dir.path()));
+        const auto restore = qScopeGuard([&] { qputenv("HOME", original); });
+        const QString primary = dir.filePath(".agents/skills/nudge/SKILL.md");
+        const QString alternate = dir.filePath(".claude/skills/nudge");
+        QVERIFY(QDir().mkpath(QFileInfo(primary).path()));
+        QVERIFY(QDir().mkpath(QFileInfo(alternate).path()));
+        write(primary, "Keep this");
+        write(alternate, "Occupied");
+        QCOMPARE(cliRun(dir.filePath("reminders.db"), {"skill", "install", "--json"}).code, 1);
+        QFile previous(primary);
+        QVERIFY(previous.open(QIODevice::ReadOnly));
+        QCOMPARE(previous.readAll(), QByteArray("Keep this"));
+        previous.close();
+        QVERIFY(QFile::remove(alternate));
+        QVERIFY(QFile::setPermissions(QFileInfo(alternate).path(), QFile::ReadOwner | QFile::ExeOwner));
+        QCOMPARE(cliRun(dir.filePath("reminders.db"), {"skill", "install", "--json"}).code, 1);
+        QVERIFY(QFile::setPermissions(QFileInfo(alternate).path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QVERIFY(previous.open(QIODevice::ReadOnly));
+        QCOMPARE(previous.readAll(), QByteArray("Keep this"));
+    }
+
+    void installingAKitResolvesRelocatedAndSharedSkillDirectories() {
+        for (const auto &layout : {QString("nested/elsewhere/skills"), QString(".agents/skills")}) {
+            QTemporaryDir dir;
+            const QByteArray original = qgetenv("HOME");
+            qputenv("HOME", QFile::encodeName(dir.path()));
+            const auto restore = qScopeGuard([&] { qputenv("HOME", original); });
+            QVERIFY(QDir().mkpath(dir.filePath(".claude")));
+            QVERIFY(QDir().mkpath(dir.filePath(layout)));
+            QVERIFY(QFile::link(dir.filePath(layout), dir.filePath(".claude/skills")));
+            const CliRun ran = cliRun(dir.filePath("reminders.db"), {"skill", "install", "--json"});
+            QCOMPARE(ran.code, 0);
+            const QString active = cliJson(ran).value("linked").toString() + "/SKILL.md";
+            const QString installed = cliJson(ran).value("installed").toString();
+            QVERIFY(QFile::exists(active));
+            QCOMPARE(QFileInfo(active).canonicalFilePath(), QFileInfo(installed).canonicalFilePath());
+        }
+    }
+
+    void typingForAPictureChangesOnlyItsCopy() {
+        QTemporaryDir dir;
+        const QString source = dir.filePath("reminders.db"), copy = dir.filePath("picture.db");
+        Store real(source);
+        const qint64 list = addList(real, "Home");
+        add(real, list, "From the original");
+        QCOMPARE(Store::copyForPicture(source, copy), QString());
+        Store picture(copy);
+        QVERIFY(picture.isOpen());
+        QCOMPARE(picture.reminders().size(), 1);
+        Backend backend(&picture);
+        quiet(backend, dir);
+        const auto id = backend.addReminder();
+        backend.commitTitle(id, "Words for the picture tomorrow");
+        QCOMPARE(picture.reminders().size(), 2);
+        QCOMPARE(Store(source).reminders().size(), 1);
+    }
+
+    void anOlderUntitledReminderWithDetailsSurvivesStartup() {
+        QTemporaryDir dir;
+        Store store(dir.filePath("reminders.db"));
+        const auto id = add(store, addList(store, "Home"), "", friday.date());
+        age(store, id, 3600);
+        Backend backend(&store);
+        quiet(backend, dir);
+        QVERIFY(store.reminder(id));
+        QCOMPARE(store.reminder(id)->due, friday.date());
     }
 
     void addingAReminderWarnsOfNothing() {

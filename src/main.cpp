@@ -17,6 +17,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <cstdio>
+#include <memory>
 
 #include "alerts.h"
 #include "backend.h"
@@ -117,7 +118,19 @@ int main(int argc, char *argv[]) {
     // Omarchy's own, with that theme as the current one.
     QTemporaryDir stand;
     QString showing;
+    QString database;
     if (screenshot) {
+        const QString source = Store::defaultPath();
+        if (!stand.isValid() || Store::isDatabaseFile(source, args.value("screenshot"))) {
+            fprintf(stderr, "nudge: choose a picture path separate from the reminders database\n");
+            return 1;
+        }
+        database = stand.filePath("picture.db");
+        const QString error = Store::copyForPicture(source, database);
+        if (!error.isEmpty()) {
+            fprintf(stderr, "nudge: could not copy reminders for the picture: %s\n", qPrintable(error));
+            return 1;
+        }
         showing = "/nonexistent";
         if (args.isSet("theme")) {
             const QString asked = args.value("theme");
@@ -144,10 +157,13 @@ int main(int argc, char *argv[]) {
     };
     adoptFont();
     QObject::connect(&look, &Look::changed, &app, adoptFont);
-    Store store;
-    store.watch();
-    DesktopAlerts alerts(false);
+    Store store(database);
+    std::unique_ptr<DesktopAlerts> alerts;
     Backend backend(&store);
+    if (screenshot)
+        backend.setService({}, {});
+    else
+        store.watch();
     if (screenshot && args.isSet("now")) {
         const QDateTime now = QDateTime::fromString(args.value("now"), Qt::ISODate);
         if (!now.isValid()) {
@@ -158,8 +174,10 @@ int main(int argc, char *argv[]) {
     }
     if (args.isSet("view"))
         backend.setViewKey(args.value("view"));
-    if (!screenshot)
-        backend.attachAlerts(&alerts);
+    if (!screenshot) {
+        alerts = std::make_unique<DesktopAlerts>(false);
+        backend.attachAlerts(alerts.get());
+    }
 
     QQmlApplicationEngine engine;
     QObject::connect(&translator, &Translator::changed, &backend, &Backend::retranslate);

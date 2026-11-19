@@ -63,6 +63,7 @@ struct Reminder {
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
 
     bool operator==(const Reminder &) const = default;
+    bool hasContent() const;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
     qint64 dueAt() const; // when the alert is due, 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
@@ -98,6 +99,8 @@ public:
     ~Store() override;
 
     static QString defaultPath();
+    static bool isDatabaseFile(const QString &database, const QString &path);
+    static QString copyForPicture(const QString &source, const QString &destination);
     bool isOpen() const { return m_open; }
     QString error() const { return m_error; }
     QString path() const { return m_path; }

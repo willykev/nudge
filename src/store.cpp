@@ -14,12 +14,33 @@
 #include <atomic>
 #include <type_traits>
 #include <utility>
+#include <sys/stat.h>
 
 namespace {
 QString isoDate(const QDate &date) { return date.isValid() ? date.toString(Qt::ISODate) : QString(); }
 QDate fromIso(const QString &text) { return text.isEmpty() ? QDate() : QDate::fromString(text, Qt::ISODate); }
 QVariant idOrNull(qint64 id) { return id ? QVariant(id) : QVariant(QMetaType::fromType<qint64>()); }
 QString normalPath() { return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/nudge/nudge.db"; }
+
+QString physicalPath(const QString &path) {
+    QFileInfo file(path);
+    QSet<QString> visited;
+    while (file.isSymLink() && !visited.contains(file.absoluteFilePath())) {
+        visited.insert(file.absoluteFilePath());
+        file.setFile(file.symLinkTarget());
+    }
+    const QString directory = file.dir().canonicalPath();
+    return QDir::cleanPath(directory.isEmpty() ? file.absoluteFilePath() : QDir(directory).filePath(file.fileName()));
+}
+
+bool sameFile(const QString &a, const QString &b) {
+    if (a == b || physicalPath(a) == physicalPath(b))
+        return true;
+    struct stat first{}, second{};
+    return ::stat(QFile::encodeName(a).constData(), &first) == 0 &&
+           ::stat(QFile::encodeName(b).constData(), &second) == 0 &&
+           first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
 
 const char *const reminderColumns =
     "id, list_id, section_id, parent_id, title, notes, url, due, due_minutes, repeat,"
@@ -155,6 +176,11 @@ bool Reminder::sameContent(const Reminder &other) const {
     return a == b;
 }
 
+bool Reminder::hasContent() const {
+    return !title.trimmed().isEmpty() || !notes.isEmpty() || !url.isEmpty() || due.isValid() ||
+           !repeat.isEmpty() || early || priority || flagged || !tags.isEmpty() || completed;
+}
+
 qint64 Reminder::dueAt() const {
     if (!due.isValid())
         return 0;
@@ -167,6 +193,40 @@ QString Store::defaultPath() {
     if (!override.isEmpty())
         return override;
     return normalPath();
+}
+
+bool Store::isDatabaseFile(const QString &database, const QString &path) {
+    const QString physical = physicalPath(database);
+    for (const QString &suffix : {QString(), QString("-wal"), QString("-shm"), QString("-journal")})
+        if (sameFile(database + suffix, path) || (database != physical && sameFile(physical + suffix, path)))
+            return true;
+    return false;
+}
+
+QString Store::copyForPicture(const QString &source, const QString &destination) {
+    if (!QFileInfo::exists(source))
+        return {};
+    const QString name = "nudge-picture";
+    QString error;
+    {
+        auto reader = QSqlDatabase::addDatabase("QSQLITE", name);
+        reader.setDatabaseName(source);
+        reader.setConnectOptions("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=4000");
+        if (!reader.open()) {
+            error = reader.lastError().text();
+        } else {
+            QSqlQuery copy(reader);
+            if (!copy.prepare("VACUUM INTO ?")) {
+                error = copy.lastError().text();
+            } else {
+                copy.addBindValue(destination);
+                if (!copy.exec())
+                    error = copy.lastError().text();
+            }
+        }
+    }
+    QSqlDatabase::removeDatabase(name);
+    return error;
 }
 
 Store::Store(const QString &path, QObject *parent) : QObject(parent) {
@@ -892,11 +952,7 @@ void Store::removeEmptyDraft(qint64 id) {
 
 void Store::cleanUpDrafts(qint64 olderThan) {
     // Check again under the lock in case another window has filled one in.
-    auto empty = [olderThan](const Reminder &r) {
-        return r.title.isEmpty() && r.notes.isEmpty() && r.url.isEmpty() && !r.due.isValid() &&
-               r.repeat.isEmpty() && !r.flagged && !r.priority && r.tags.isEmpty() && !r.completed &&
-               r.modifiedAt < olderThan;
-    };
+    auto empty = [olderThan](const Reminder &r) { return !r.hasContent() && r.modifiedAt < olderThan; };
     if (std::none_of(m_reminders.cbegin(), m_reminders.cend(), empty))
         return;
     Tx tx(this, {}, Latest);
