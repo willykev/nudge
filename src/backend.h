@@ -89,6 +89,7 @@ public:
     Q_INVOKABLE void selectEdge(bool last);
     Q_INVOKABLE void stepView(int delta);
     Q_INVOKABLE void reveal(qint64 id);
+    void selectReminder(qint64 id);
 
     // Reminders.
     Q_INVOKABLE qint64 addReminder();
@@ -118,7 +119,7 @@ public:
     Q_INVOKABLE void setNotes(qint64 id, const QString &text);
     Q_INVOKABLE void setUrl(qint64 id, const QString &text);
     Q_INVOKABLE bool setDate(qint64 id, const QString &text);
-    Q_INVOKABLE void setDateIso(qint64 id, const QString &iso);
+    Q_INVOKABLE bool setDateIso(qint64 id, const QString &iso);
     Q_INVOKABLE bool setTime(qint64 id, const QString &text);
     Q_INVOKABLE void setRepeat(qint64 id, const QString &unit, int interval);
     Q_INVOKABLE bool setRepeatEnd(qint64 id, const QString &text);
@@ -128,7 +129,7 @@ public:
 
     // Lists and sections.
     Q_INVOKABLE qint64 addList(const QString &name, const QString &color);
-    Q_INVOKABLE void updateList(qint64 id, const QString &name, const QString &color);
+    Q_INVOKABLE bool updateList(qint64 id, const QString &name, const QString &color);
     Q_INVOKABLE void removeList(qint64 id);
     Q_INVOKABLE void moveList(qint64 id, int delta);
     Q_INVOKABLE QVariantMap listInfo(qint64 id) const;
@@ -183,11 +184,14 @@ private:
     void selectNear(int row);
     void rememberSelection();
     bool edit(qint64 id, const QString &what, const std::function<void(Reminder &)> &change);
+    bool setDueDate(qint64 id, const QDate &date);
     QString stepKey(qint64 id, const QString &key = {}) const;
     QVector<qint64> completedInView() const;
     double positionAfter(const Reminder &reminder) const;
     double positionBefore(const Reminder &reminder) const;
     void spread(qint64 listId);
+    void moveFamilyToSection(const Reminder &moved);
+    bool listNameAvailable(const QString &name, qint64 except = 0);
     void checkBackground();
     QString sortName(const QString &mode) const;
     QDateTime now() const { return m_clock(); }

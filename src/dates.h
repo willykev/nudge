@@ -27,6 +27,7 @@ namespace Dates {
 QuickEntry parseQuick(const QString &text, const QDateTime &now);
 QDate parseDate(const QString &text, const QDate &today); // invalid when not understood
 int parseTime(const QString &text);                       // minutes after midnight, or -1
+QDate nextClockDate(int minutes, const QDateTime &now, bool &lateFold); // next time the clock shows this minute
 
 QString formatDay(const QDate &date, const QDate &today); // Today, Friday, Fri, Nov 20
 QString formatEditableDate(const QDate &date);

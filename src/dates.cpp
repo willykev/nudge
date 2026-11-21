@@ -211,23 +211,29 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         static const QStringList parts{"morning", "afternoon", "evening", "night"};
         return parts.indexOf(word);
     };
+    auto takeDay = [&](int from, int length, const QStringList &leading) {
+        dayPart = qualifier(words.value(from + length));
+        take(from, length + (dayPart >= 0), leading);
+    };
     auto article = [&](int index) {
         const QString word = words.value(index - 1);
         return word == "the" || word == "a" || word == "an";
     };
-    auto endpoint = [&](int index) {
+    auto endpointLength = [&](int index) {
         const QString word = words.value(index);
-        return weekday(word) || word == "tomorrow" || word == "today" ||
-               QDate::fromString(word, Qt::ISODate).isValid() || timeAt(words, index).minutes >= 0;
+        if (weekday(word) || word == "tomorrow" || word == "today" || QDate::fromString(word, Qt::ISODate).isValid())
+            return 1;
+        return timeAt(words, index).used;
     };
     // Keep a range or an ordinal weekday rule together if it cannot be
     // scheduled as written. Pulling out one date changes its meaning.
     static const QRegularExpression ordinal("^(?:first|second|third|fourth|fifth|last|\\d+(?:st|nd|rd|th))$");
     bool keepSchedule = false;
-    for (int i = 1; !lenient && i + 1 < size; ++i) {
-        const QString &word = words[i];
-        if (((word == "to" || word == "through" || word == "or") && endpoint(i - 1) && endpoint(i + 1)) ||
-            (words[i - 1] == "every" && ordinal.match(word).hasMatch() && weekday(words[i + 1]))) {
+    for (int i = 0; !lenient && i + 2 < size; ++i) {
+        const int length = endpointLength(i);
+        const QString join = words.value(i + length);
+        if ((length && (join == "to" || join == "through" || join == "or") && endpointLength(i + length + 1)) ||
+            (words[i] == "every" && ordinal.match(words[i + 1]).hasMatch() && weekday(words[i + 2]))) {
             keepSchedule = true;
             break;
         }
@@ -308,14 +314,12 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
 
         if (word == "today") {
             date = today;
-            dayPart = qualifier(next);
-            take(i, dayPart >= 0 ? 2 : 1, beforeDay);
+            takeDay(i, 1, beforeDay);
             continue;
         }
         if (word == "tomorrow" || word == "tmrw" || word == "tmr") {
             date = today.addDays(1);
-            dayPart = qualifier(next);
-            take(i, dayPart >= 0 ? 2 : 1, beforeDay);
+            takeDay(i, 1, beforeDay);
             continue;
         }
         if (word == "tonight" || (word == "this" && next == "evening")) {
@@ -329,23 +333,23 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             const QDate monday = today.addDays(8 - today.dayOfWeek());
             if (next == "week") {
                 date = monday;
-                take(i, 2, beforeDay);
+                takeDay(i, 2, beforeDay);
                 continue;
             }
             if (next == "month") {
                 date = QDate(today.year(), today.month(), 1).addMonths(1);
-                take(i, 2, beforeDay);
+                takeDay(i, 2, beforeDay);
                 continue;
             }
             if (const int day = weekday(next)) {
                 date = monday.addDays(day - 1);
-                take(i, 2, beforeDate);
+                takeDay(i, 2, beforeDate);
                 continue;
             }
         }
         if (word == "this" && next == "weekend") {
             date = today.addDays((6 - today.dayOfWeek() + 7) % 7);
-            take(i, 2, beforeDay);
+            takeDay(i, 2, beforeDay);
             continue;
         }
 
@@ -383,12 +387,13 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         }
 
         if (const int day = weekday(word)) {
-            if (lenient || beforeWeekday.contains(words.value(i - 1)) || (!article(i) && closes(i + 1))) {
+            if (lenient || beforeWeekday.contains(words.value(i - 1)) ||
+                (!article(i) && closes(i + 1 + (qualifier(next) >= 0)))) {
                 int ahead = (day - today.dayOfWeek() + 7) % 7;
                 if (ahead == 0 && words.value(i - 1) != "this")
                     ahead = 7;
                 date = today.addDays(ahead);
-                take(i, 1, beforeWeekday);
+                takeDay(i, 1, beforeWeekday);
                 continue;
             }
         }
@@ -413,7 +418,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             const QDate found = stated ? QDate(stated, monthNumber, day) : nextDate(monthNumber, day, today);
             if (found.isValid()) {
                 date = found;
-                take(i, stated ? 3 : 2, beforeDate);
+                takeDay(i, stated ? 3 : 2, beforeDate);
                 continue;
             }
         }
@@ -421,7 +426,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
             const QDate iso = QDate::fromString(word, Qt::ISODate);
             if (iso.isValid()) {
                 date = iso;
-                take(i, 1, beforeDate);
+                takeDay(i, 1, beforeDate);
                 continue;
             }
         }
@@ -430,7 +435,7 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         if ((word.contains('/') || word.contains('.')) && (lenient || beforeDate.contains(words.value(i - 1)))) {
             if (const QDate local = numericDate(word, today, QLocale()); local.isValid()) {
                 date = local;
-                take(i, 1, beforeDate);
+                takeDay(i, 1, beforeDate);
                 continue;
             }
         }
@@ -467,10 +472,10 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
         } else if (guessed) {
             const int hour = minutes / 60 % 12;
             const bool nextMorning = dayPart == 3 && hour <= 4;
-            if (nextMorning)
-                date = date.addDays(1);
             minutes = (hour + (dayPart == 0 || nextMorning ? 0 : 12)) * 60 + minutes % 60;
         }
+        if (dayPart == 3 && minutes < 5 * 60)
+            date = date.addDays(1);
     }
     // Tonight without a time is eight o'clock or, once eight has gone by, the
     // next hour on the clock: after eleven that is midnight, moved on below.
@@ -496,17 +501,21 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
     if (repeatDay) {
         const bool implicit = !date.isValid();
         date = Repeat::onWeekday(date.isValid() ? date : today, repeatDay);
-        if (implicit && date == today && minutes >= 0 && minutes <= nowMinutes)
+        if (implicit && date == today && minutes >= 0 && Dates::nextClockDate(minutes, now, lateFold) != today)
             date = date.addDays(7);
     }
     if (minutes >= 0 && !date.isValid()) {
         // A time on its own is the next time the clock shows it.
-        date = minutes > nowMinutes ? today : today.addDays(1);
+        date = Dates::nextClockDate(minutes, now, lateFold);
     }
     if (repeat.repeats() && !date.isValid())
         date = today;
-    if (repeat.unit == Repeat::Weekdays)
-        date = Repeat::firstWorkday(date);
+    if (repeat.unit == Repeat::Weekdays) {
+        const QDate workday = Repeat::firstWorkday(date);
+        if (workday != date)
+            lateFold = false;
+        date = workday;
+    }
     if (repeat.unit == Repeat::Monthly || repeat.unit == Repeat::Yearly)
         repeat.anchorDay = date.day();
 
@@ -531,6 +540,27 @@ Parsed parse(const QString &text, const QDateTime &now, bool lenient) {
 QString translate(const char *text) { return QCoreApplication::translate("Dates", text); }
 
 } // namespace
+
+QDate Dates::nextClockDate(int minutes, const QDateTime &now, bool &lateFold) {
+    const QTime time(minutes / 60, minutes % 60);
+    const QTimeZone zone = now.timeRepresentation();
+    lateFold = false;
+    if (!now.isValid() || !time.isValid())
+        return {};
+    for (QDate day = now.date(); day.isValid() && day.year() <= 9999; day = day.addDays(1)) {
+        const QDateTime first(day, time, zone, QDateTime::TransitionResolution::PreferBefore);
+        if (first.date() != day || first.time() != time)
+            continue; // the clock skipped this minute
+        if (first > now)
+            return day;
+        const QDateTime later(day, time, zone, QDateTime::TransitionResolution::PreferAfter);
+        if (later > now) {
+            lateFold = true;
+            return day;
+        }
+    }
+    return {};
+}
 
 QuickEntry Dates::parseQuick(const QString &text, const QDateTime &now) {
     const Parsed parsed = parse(text, now, false);

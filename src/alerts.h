@@ -87,7 +87,7 @@ private:
     // that was due then, the moment its buttons answer for.
     struct Shown {
         qint64 id = 0;
-        qint64 dueAt = 0;
+        Reminder::Occurrence occurrence;
         QString title, body; // as shown, to show again without buttons
     };
 

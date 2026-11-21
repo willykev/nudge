@@ -3,6 +3,8 @@ set -eu
 
 # The tree's real path, symlinks resolved, which is how qmake sees it.
 ROOT="$(CDPATH= cd -P -- "$(dirname -- "$0")/.." && pwd -P)"
+# The screenshot test runs the application through its command line.
+"$ROOT/bin/build" >/dev/null
 mkdir -p "$ROOT/build/tests"
 cd "$ROOT/build/tests"
 

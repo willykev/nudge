@@ -19,15 +19,6 @@
 namespace {
 const QStringList repeatUnits{"never", "daily", "weekdays", "weekly", "monthly", "yearly"};
 const QStringList sortModes{"manual", "due", "priority", "title", "created"};
-
-// A monthly or yearly reminder keeps returning to the day it is set for.
-void anchor(Reminder &r) {
-    Repeat repeat = Repeat::parse(r.repeat);
-    if (repeat.unit != Repeat::Monthly && repeat.unit != Repeat::Yearly)
-        return;
-    repeat.anchorDay = r.due.day();
-    r.repeat = repeat.toString();
-}
 } // namespace
 
 Backend::Backend(Store *store, QObject *parent)
@@ -453,8 +444,7 @@ void Backend::stepView(int delta) {
     setViewKey(entries[next].key);
 }
 
-void Backend::reveal(qint64 id) {
-    m_store->reloadIfChanged();
+void Backend::selectReminder(qint64 id) {
     if (const Reminder *r = m_store->reminder(id)) {
         const Reminder target = *r;
         if (m_collapsed.remove(target.parentId))
@@ -464,6 +454,11 @@ void Backend::reveal(qint64 id) {
         setSelectedId(id);
         emit revealSelection();
     }
+}
+
+void Backend::reveal(qint64 id) {
+    m_store->reloadIfChanged();
+    selectReminder(id);
     emit raise();
     focusNudgeWindow(QCoreApplication::applicationPid());
 }
@@ -737,10 +732,10 @@ bool Backend::edit(qint64 id, const QString &what, const std::function<void(Remi
         return false;
     Reminder r = *existing;
     change(r);
+    const bool choseFold = r.lateFold && !existing->lateFold;
     // Keystrokes in one field of one reminder undo together.
     Store::Tx tx(m_store, stepKey(id, what.isEmpty() ? QString() : QString("%1:%2").arg(what, QString::number(id))));
-    m_store->put(r);
-    return true;
+    return tx && m_store->put(r, choseFold) && tx.commit();
 }
 
 // A change to a reminder still being added is part of adding it, so one
@@ -785,11 +780,7 @@ void Backend::setPriority(qint64 id, int priority) {
 }
 
 void Backend::setDueIn(qint64 id, int days) {
-    const QDate date = now().date().addDays(days);
-    edit(id, {}, [date](Reminder &r) {
-        r.due = date;
-        anchor(r);
-    });
+    setDueDate(id, now().date().addDays(days));
 }
 
 void Backend::clearDue(qint64 id) {
@@ -966,7 +957,7 @@ void Backend::moveReminder(qint64 id, int delta) {
                 first = qMin(first, other.position);
         moved.position = first - 1;
     }
-    m_store->put(moved);
+    moveFamilyToSection(moved);
 }
 
 void Backend::moveToList(qint64 id, qint64 listId) {
@@ -1012,11 +1003,15 @@ void Backend::moveToSection(qint64 id, qint64 sectionId) {
     moved.sectionId = sectionId;
     moved.parentId = 0;
     moved.position = m_store->endPosition(moved.listId);
-    const QVector<qint64> children = m_store->childrenOf(id);
+    moveFamilyToSection(moved);
+}
+
+void Backend::moveFamilyToSection(const Reminder &moved) {
+    const QVector<qint64> children = m_store->childrenOf(moved.id);
     m_store->put(moved);
     for (qint64 childId : children) {
         Reminder child = *m_store->reminder(childId);
-        child.sectionId = sectionId;
+        child.sectionId = moved.sectionId;
         m_store->put(child);
     }
 }
@@ -1061,17 +1056,20 @@ bool Backend::setDate(qint64 id, const QString &text) {
         emit notice(tr("“%1” is not a date Nudge understands").arg(text.trimmed()));
         return false;
     }
-    setDateIso(id, date.toString(Qt::ISODate));
-    return true;
+    return setDueDate(id, date);
 }
 
-void Backend::setDateIso(qint64 id, const QString &iso) {
-    const QDate date = QDate::fromString(iso, Qt::ISODate);
+bool Backend::setDateIso(qint64 id, const QString &iso) {
+    return setDueDate(id, QDate::fromString(iso, Qt::ISODate));
+}
+
+bool Backend::setDueDate(qint64 id, const QDate &date) {
     if (!date.isValid())
-        return;
-    edit(id, {}, [date](Reminder &r) {
+        return false;
+    return edit(id, {}, [date](Reminder &r) {
+        if (r.due != date)
+            r.repeat = Repeat::parse(r.repeat).anchored(date);
         r.due = date;
-        anchor(r);
     });
 }
 
@@ -1086,15 +1084,12 @@ bool Backend::setTime(qint64 id, const QString &text) {
         return false;
     }
     const QDateTime moment = now();
-    edit(id, {}, [&](Reminder &r) {
+    return edit(id, {}, [&](Reminder &r) {
         r.dueMinutes = minutes;
         // A time needs a day: the next one the clock shows that time on.
-        if (!r.due.isValid()) {
-            const bool ahead = minutes > moment.time().hour() * 60 + moment.time().minute();
-            r.due = ahead ? moment.date() : moment.date().addDays(1);
-        }
+        if (!r.due.isValid())
+            r.due = Dates::nextClockDate(minutes, moment, r.lateFold);
     });
-    return true;
 }
 
 void Backend::setRepeat(qint64 id, const QString &unit, int interval) {
@@ -1108,9 +1103,7 @@ void Backend::setRepeat(qint64 id, const QString &unit, int interval) {
     edit(id, "repeat", [&](Reminder &r) {
         if (repeat.repeats() && !r.due.isValid())
             r.due = today;
-        if (repeat.unit == Repeat::Monthly || repeat.unit == Repeat::Yearly)
-            repeat.anchorDay = r.due.day();
-        r.repeat = repeat.toString();
+        r.repeat = repeat.anchored(r.due, r.repeat);
         if (!repeat.repeats())
             r.repeatEnd = QDate();
     });
@@ -1125,8 +1118,7 @@ bool Backend::setRepeatEnd(qint64 id, const QString &text) {
             return false;
         }
     }
-    edit(id, {}, [date](Reminder &r) { r.repeatEnd = date; });
-    return true;
+    return edit(id, {}, [date](Reminder &r) { r.repeatEnd = date; });
 }
 
 void Backend::setEarly(qint64 id, int minutes) {
@@ -1170,28 +1162,49 @@ QVariantList Backend::sections() const {
     return result;
 }
 
+bool Backend::listNameAvailable(const QString &name, qint64 except) {
+    for (const TaskList &list : m_store->lists()) {
+        if (list.id != except && list.name == name) {
+            emit notice(tr("A list named “%1” already exists.").arg(name));
+            return false;
+        }
+    }
+    return true;
+}
+
 qint64 Backend::addList(const QString &name, const QString &color) {
+    Store::Tx tx(m_store, {}, Store::Latest);
     const QStringList colors = palette();
     TaskList list;
-    list.name = name.simplified().isEmpty() ? tr("New List") : name.simplified();
+    list.name = name.simplified();
+    if (list.name.isEmpty())
+        list.name = tr("New List");
+    if (!tx || !listNameAvailable(list.name))
+        return 0;
     list.color = QColor::isValidColorName(color) ? color : colors[m_store->lists().size() % colors.size()];
     list.position = m_store->lists().isEmpty() ? 1 : m_store->lists().last().position + 1;
     const qint64 id = m_store->put(list);
-    if (id)
-        setViewKey("list:" + QString::number(id));
+    if (!id || !tx.commit())
+        return 0;
+    setViewKey("list:" + QString::number(id));
     return id;
 }
 
-void Backend::updateList(qint64 id, const QString &name, const QString &color) {
+bool Backend::updateList(qint64 id, const QString &name, const QString &color) {
+    Store::Tx tx(m_store, {}, Store::Latest);
     const TaskList *existing = m_store->list(id);
-    if (!existing)
-        return;
+    if (!tx || !existing)
+        return false;
     TaskList list = *existing;
-    if (!name.simplified().isEmpty())
-        list.name = name.simplified();
+    const QString renamed = name.simplified();
+    if (!renamed.isEmpty() && renamed != list.name) {
+        if (!listNameAvailable(renamed, id))
+            return false;
+        list.name = renamed;
+    }
     if (QColor::isValidColorName(color))
         list.color = color;
-    m_store->put(list);
+    return m_store->put(list) && tx.commit();
 }
 
 void Backend::removeList(qint64 id) {

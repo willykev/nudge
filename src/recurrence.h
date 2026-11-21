@@ -17,6 +17,7 @@ struct Repeat {
 
     static Repeat parse(const QString &rule);
     QString toString() const;
+    QString anchored(const QDate &date, const QString &previousRule = {}) const;
     bool repeats() const { return unit != Never; }
     static QDate onWeekday(const QDate &date, int day);
     static QDate firstWorkday(const QDate &date);

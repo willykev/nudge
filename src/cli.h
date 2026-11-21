@@ -9,7 +9,7 @@
 // output stays in English whatever the desktop's language is.
 bool isCliCommand(const QString &word);
 QString cliSummary();
-int runCli(const QStringList &arguments);
+int runCli(const QStringList &arguments, const QString &unitFile = "/usr/lib/systemd/user/nudge.service");
 int runCliInDesktopLocale(const QStringList &arguments, const QString &languageFile = {});
 
 // The background service: alerts for reminders while no window is open.

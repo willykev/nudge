@@ -210,7 +210,7 @@ void Notifier::check(const QDateTime &now) {
     const qint64 seconds = now.toSecsSinceEpoch();
     const QTimeZone zone = now.timeRepresentation();
     struct Pending {
-        qint64 id;
+        Reminder reminder;
         qint64 dueAt, earlyAt, when;
         bool early, due, snoozed;
     };
@@ -239,19 +239,19 @@ void Notifier::check(const QDateTime &now) {
         // leave that alone.
         if (r.snoozeUntil > seconds)
             continue;
-        Pending p{r.id, dueAt, earlyAt, 0, false, false, false};
-        p.snoozed = r.snoozeUntil && r.snoozeUntil <= seconds;
-        p.early = !p.snoozed && earlyAt && earlyAt <= seconds && dueAt > seconds && r.alertedDue != dueAt &&
-                  r.alertedEarly != earlyAt && earlyAt >= r.earlySince() - 60;
-        p.due = dueAt <= seconds && r.alertedDue != dueAt && dueAt >= r.scheduledSince() - 60;
-        p.when = p.snoozed ? r.snoozeUntil : p.due ? dueAt : earlyAt;
-        if (p.early || p.due || p.snoozed)
-            pending.append(p);
+        const bool snoozed = r.snoozeUntil != 0;
+        // The store clears each delivery mark when its local occurrence or lead changes.
+        // A new time zone can change the UTC instant of an occurrence already announced.
+        const bool early = !snoozed && earlyAt && earlyAt <= seconds && dueAt > seconds && !r.alertedDue &&
+                           !r.alertedEarly && earlyAt >= r.earlySince() - 60;
+        const bool due = dueAt <= seconds && !r.alertedDue && dueAt >= r.scheduledSince() - 60;
+        if (early || due || snoozed)
+            pending.append({r, dueAt, earlyAt, snoozed ? r.snoozeUntil : due ? dueAt : earlyAt, early, due, snoozed});
     }
 
     if (!pending.isEmpty() && m_alerts->mayAlert()) {
         std::sort(pending.begin(), pending.end(), [](const Pending &a, const Pending &b) {
-            return a.when != b.when ? a.when < b.when : a.id < b.id;
+            return a.when != b.when ? a.when < b.when : a.reminder.id < b.reminder.id;
         });
         const QDate today = now.date();
         // Where the desktop reads the body as markup, a & or < in a title, a
@@ -260,17 +260,22 @@ void Notifier::check(const QDateTime &now) {
         const bool markup = m_alerts->bodyMarkup();
         auto asBody = [markup](const QString &text) { return markup ? text.toHtmlEscaped() : text; };
         auto mark = [&](const Pending &p) {
-            const Reminder *r = m_store->reminder(p.id);
+            // Sending goes through the desktop. Another writer may have changed the
+            // reminder in the meantime. Mark only the occurrence and lead actually sent.
+            const Reminder *r = m_store->reminder(p.reminder.id);
+            if (!r || r->completed || r->occurrence() != p.reminder.occurrence())
+                return;
             const bool pastDue = p.due || (p.snoozed && p.dueAt <= seconds);
-            const bool pastEarly = p.early || (p.snoozed && p.earlyAt <= seconds);
-            m_store->setAlerted(p.id, pastDue ? p.dueAt : r->alertedDue, pastEarly ? p.earlyAt : r->alertedEarly,
-                                p.snoozed ? 0 : r->snoozeUntil);
+            const bool pastEarly = r->early == p.reminder.early && (p.early || (p.snoozed && p.earlyAt <= seconds));
+            const bool woke = p.snoozed && r->snoozeUntil == p.reminder.snoozeUntil;
+            m_store->setAlerted(r->id, pastDue ? p.dueAt : r->alertedDue, pastEarly ? p.earlyAt : r->alertedEarly,
+                                woke ? 0 : r->snoozeUntil);
         };
         if (pending.size() > 3) {
             // After a night off there may be a pile; say so once.
             QStringList titles;
             for (int i = 0; i < pending.size() && i < 5; ++i)
-                titles << m_store->reminder(pending[i].id)->title;
+                titles << pending[i].reminder.title;
             if (pending.size() > 5)
                 titles << QStringLiteral("…");
             const bool allEarly = std::all_of(pending.cbegin(), pending.cend(), [](const Pending &p) { return p.early; });
@@ -282,30 +287,30 @@ void Notifier::check(const QDateTime &now) {
             const QString body = asBody(titles.join('\n'));
             const quint32 shown = m_alerts->show(title, body, {"default", tr("Open")});
             if (shown) {
-                m_shown.insert(shown, {0, 0, title, body});
+                m_shown.insert(shown, {0, {}, title, body});
                 for (const Pending &p : pending)
                     mark(p);
             }
         } else {
             for (const Pending &p : pending) {
-                const Reminder *r = m_store->reminder(p.id);
-                const TaskList *list = m_store->list(r->listId);
-                QStringList body{Dates::formatDue(r->due, r->dueMinutes, today)};
+                const Reminder &r = p.reminder;
+                const TaskList *list = m_store->list(r.listId);
+                QStringList body{Dates::formatDue(r.due, r.dueMinutes, today)};
                 if (list)
                     body << list->name;
                 QString text = body.join(QStringLiteral(" · "));
                 if (p.early && !p.due)
                     text = tr("Coming up: %1").arg(text);
-                if (!r->notes.isEmpty())
-                    text += '\n' + r->notes.section('\n', 0, 0);
+                if (!r.notes.isEmpty())
+                    text += '\n' + r.notes.section('\n', 0, 0);
                 text = asBody(text);
-                const QString title = r->title.isEmpty() ? tr("Reminder") : r->title;
+                const QString title = r.title.isEmpty() ? tr("Reminder") : r.title;
                 const quint32 shown =
                     m_alerts->show(title, text,
                                    {"default", tr("Open"), "done", tr("Complete"), "hour", tr("In an Hour"),
                                     "tomorrow", tr("Tomorrow")});
                 if (shown) {
-                    m_shown.insert(shown, {p.id, p.dueAt, title, text});
+                    m_shown.insert(shown, {r.id, r.occurrence(), title, text});
                     mark(p);
                 }
             }
@@ -338,7 +343,7 @@ void Notifier::act(quint32 notification, const QString &action, const QDateTime 
         Store::Tx tx(m_store, {}, Store::Latest);
         const Reminder *r = tx ? m_store->reminder(id) : nullptr;
         const QTimeZone zone = now.timeRepresentation();
-        if (!r || r->completed || r->dueAt(zone) != shown.dueAt)
+        if (!r || r->completed || r->occurrence() != shown.occurrence)
             return;
         if (action == "done") {
             m_store->complete(id, now);

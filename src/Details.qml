@@ -14,6 +14,7 @@ Rectangle {
     property var item: ({})
     readonly property bool has: item.id !== undefined
     property var loadedId: 0
+    readonly property string viewKey: backend.viewKey
 
     readonly property var repeatUnits: ["never", "daily", "weekdays", "weekly", "monthly", "yearly"]
     readonly property var earlyMinutes: [0, 5, 15, 30, 60, 120, 1440, 2880, 10080]
@@ -51,11 +52,10 @@ Rectangle {
     Connections {
         target: backend
         function onSelectedChanged() { pane.load() }
-        // A new view can pick the reminder being filled in as its first row,
-        // so the selection reads the same, yet the view leaving it settles
-        // it: what was typed for it is saved first.
-        function onViewChanged() { pane.flush() }
     }
+    // A new view can pick the same reminder as its first row. Save its edits
+    // before leaving the old view, even when the selection stays the same.
+    onViewKeyChanged: if (loadedId) flush()
     Component.onCompleted: load()
 
     // Small and bold, as the shell heads the sections of its panels.

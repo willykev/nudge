@@ -209,6 +209,8 @@ int main(int argc, char *argv[]) {
     }
     if (args.isSet("details"))
         window->setProperty("detailsVisible", true);
+    if (screenshot && reminder)
+        backend.selectReminder(reminder);
     if (args.isSet("help-overlay"))
         window->setProperty("helpVisible", true);
     if (args.isSet("show"))

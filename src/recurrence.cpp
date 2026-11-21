@@ -40,6 +40,16 @@ QString Repeat::toString() const {
     return {};
 }
 
+QString Repeat::anchored(const QDate &date, const QString &previousRule) const {
+    Repeat rule = *this;
+    if (unit == Monthly || unit == Yearly) {
+        const Repeat previous = parse(previousRule);
+        rule.anchorDay = previous.unit == unit && previous.interval == interval && previous.anchorDay
+                             ? previous.anchorDay : date.day();
+    }
+    return rule.toString();
+}
+
 QDate Repeat::onWeekday(const QDate &date, int day) {
     return representable(date.addDays((day - date.dayOfWeek() + 7) % 7));
 }

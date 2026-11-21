@@ -122,7 +122,7 @@ Reminder rebased(const Reminder &current, const Reminder &before, const Reminder
     TAKE(title);
     TAKE(notes);
     TAKE(url);
-    if (after.due != before.due || after.dueMinutes != before.dueMinutes || after.lateFold != before.lateFold) {
+    if (after.occurrence() != before.occurrence()) {
         merged.due = after.due;
         merged.dueMinutes = after.dueMinutes;
         merged.lateFold = after.lateFold;
@@ -438,8 +438,13 @@ void Store::prepare() {
     m_putSection = QSqlQuery(m_db);
     m_putSection.prepare("INSERT OR REPLACE INTO sections (id, list_id, name, position) VALUES (?, ?, ?, ?)");
     m_setAlerted = QSqlQuery(m_db);
-    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? "
-                        "WHERE id = ? AND completed = 0 AND due = ? AND due_minutes = ? AND late_fold = ? AND early = ?");
+    // Delivery can overlap another writer. Each mark belongs to the due
+    // occurrence, but only the early mark also belongs to a particular lead.
+    m_setAlerted.prepare(
+        "UPDATE reminders SET alerted_due = CASE WHEN alerted_due = :wasDue THEN :due ELSE alerted_due END, "
+        "alerted_early = CASE WHEN early = :lead AND alerted_early = :wasEarly THEN :early ELSE alerted_early END, "
+        "snooze_until = CASE WHEN snooze_until = :wasSnooze THEN :snooze ELSE snooze_until END "
+        "WHERE id = :id AND completed = 0 AND due = :date AND due_minutes = :minutes AND late_fold = :fold");
 }
 
 // Everything is read in one read transaction, so it is one moment of the
@@ -882,6 +887,12 @@ qint64 Store::put(Reminder r, bool keepFold) {
         m_broken = true;
         return commit() ? r.id : 0;
     }
+    if (!r.repeat.isEmpty() && r.repeatEnd.isValid() && r.due > r.repeatEnd &&
+        (!before || before->due != r.due || before->repeat != r.repeat || before->repeatEnd != r.repeatEnd)) {
+        fail(tr("The repeat would start after it ends."));
+        m_broken = true;
+        return commit() ? r.id : 0;
+    }
     const bool newHome = !before || before->listId != r.listId || before->sectionId != r.sectionId ||
                          before->parentId != r.parentId;
     if (newHome) {
@@ -905,8 +916,7 @@ qint64 Store::put(Reminder r, bool keepFold) {
         r.createdAt = now;
     r.modifiedAt = now;
     // A new date or time is a new moment to alert at, given it now.
-    const bool moved = !before || before->due != r.due || before->dueMinutes != r.dueMinutes ||
-                       before->lateFold != r.lateFold;
+    const bool moved = !before || before->occurrence() != r.occurrence();
     if (moved)
         r.scheduledAt = now;
     if (moved || before->early != r.early)
@@ -1112,8 +1122,7 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
     const Reminder offered = *existing;
     Tx tx(this, {}, Latest);
     existing = tx ? reminder(id) : nullptr;
-    if (!existing || existing->completed || existing->draft || existing->due != offered.due ||
-        existing->dueMinutes != offered.dueMinutes || existing->lateFold != offered.lateFold)
+    if (!existing || existing->completed || existing->draft || existing->occurrence() != offered.occurrence())
         return {};
     Reminder r = *existing;
     const qint64 seconds = now.toSecsSinceEpoch();
@@ -1243,8 +1252,7 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     }
     Reminder r = *state;
     r.modifiedAt = QDateTime::currentSecsSinceEpoch();
-    const bool sameMoment = current && current->due == r.due && current->dueMinutes == r.dueMinutes &&
-                            current->lateFold == r.lateFold;
+    const bool sameMoment = current && current->occurrence() == r.occurrence();
     if (sameMoment) {
         r.alertedDue = current->alertedDue;
         if (current->early == r.early)
@@ -1387,19 +1395,22 @@ void Store::setAlerted(qint64 id, qint64 due, qint64 early, qint64 snoozeUntil) 
     const auto found = m_reminders.find(id);
     if (!m_open || found == m_reminders.end())
         return;
+    m_setAlerted.bindValue(":id", id);
+    m_setAlerted.bindValue(":date", found->due.isValid() ? isoDate(found->due) : QStringLiteral(""));
+    m_setAlerted.bindValue(":minutes", found->dueMinutes);
+    m_setAlerted.bindValue(":fold", found->lateFold);
+    m_setAlerted.bindValue(":lead", found->early);
+    m_setAlerted.bindValue(":wasDue", found->alertedDue);
+    m_setAlerted.bindValue(":wasEarly", found->alertedEarly);
+    m_setAlerted.bindValue(":wasSnooze", found->snoozeUntil);
+    m_setAlerted.bindValue(":due", due);
+    m_setAlerted.bindValue(":early", early);
+    m_setAlerted.bindValue(":snooze", snoozeUntil);
     // Memory takes the marks even when the disk does not: an alert that
     // could not be marked would otherwise go out again every minute.
     found->alertedDue = due;
     found->alertedEarly = early;
     found->snoozeUntil = snoozeUntil;
-    m_setAlerted.bindValue(0, due);
-    m_setAlerted.bindValue(1, early);
-    m_setAlerted.bindValue(2, snoozeUntil);
-    m_setAlerted.bindValue(3, id);
-    m_setAlerted.bindValue(4, found->due.isValid() ? isoDate(found->due) : QStringLiteral(""));
-    m_setAlerted.bindValue(5, found->dueMinutes);
-    m_setAlerted.bindValue(6, found->lateFold);
-    m_setAlerted.bindValue(7, found->early);
     if (!m_setAlerted.exec())
         fail(m_setAlerted.lastError().text());
 }
@@ -1532,7 +1543,11 @@ void Store::forget(const Rows &touched, const Rows &held, const Rows &gone) {
                 for (const auto *state : {&delta.before, &delta.after})
                     if (*state)
                         holds.holdFor(**state);
-            if (!writes.meets(fixed) && !writes.meets(holding) && !holds.meets(missing))
+            // Editing a list's name, color, position or sort keeps its members in place.
+            // A section or a parent, on the other hand, can move to a different list.
+            Rows containers = writes;
+            containers.lists = makes.lists;
+            if (!writes.meets(fixed) && !containers.meets(holding) && !holds.meets(missing))
                 continue;
             fixed.add(writes);
             holding.add(holds);

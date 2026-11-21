@@ -103,28 +103,33 @@ bool ready(Store &store) {
     return false;
 }
 
-const TaskList *listNamed(const Store &store, const QString &name) {
-    const TaskList *exact = nullptr, *folded = nullptr;
-    bool ambiguous = false;
-    for (const TaskList &list : store.lists()) {
-        if (list.name == name) {
-            if (exact)
-                return nullptr;
-            exact = &list;
-        }
-        if (list.name.compare(name, Qt::CaseInsensitive) == 0) {
-            ambiguous |= folded != nullptr;
-            folded = &list;
-        }
-    }
-    return exact ? exact : ambiguous ? nullptr : folded;
-}
-
 QString listNames(const Store &store) {
     QStringList names;
     for (const TaskList &list : store.lists())
         names << oneLine(list.name);
     return names.isEmpty() ? QString("There are no lists yet.") : "Lists: " + names.join(", ");
+}
+
+const TaskList *listNamed(const Store &store, const QString &name, QString &error) {
+    const TaskList *exact = nullptr, *folded = nullptr;
+    int exactCount = 0, foldedCount = 0;
+    for (const TaskList &list : store.lists()) {
+        if (list.name == name) {
+            ++exactCount;
+            exact = &list;
+        }
+        if (list.name.compare(name, Qt::CaseInsensitive) == 0) {
+            ++foldedCount;
+            folded = &list;
+        }
+    }
+    if (exactCount == 1)
+        return exact;
+    if (foldedCount == 1)
+        return folded;
+    error = foldedCount ? QString("More than one list matches “%1”. Rename a list in the window.").arg(oneLine(name))
+                        : QString("No list named %1. %2").arg(oneLine(name), listNames(store));
+    return nullptr;
 }
 
 QString isoTime(int minutes) {
@@ -136,9 +141,13 @@ QJsonValue isoMoment(qint64 seconds) {
                    : QJsonValue();
 }
 
-qint64 readMoment(const QJsonObject &entry, const QString &key) {
-    const QDateTime time = QDateTime::fromString(entry.value(key).toString(), Qt::ISODate);
-    return time.isValid() ? time.toSecsSinceEpoch() : 0;
+std::optional<qint64> readMoment(const QJsonValue &value) {
+    if (value.isUndefined() || value.isNull())
+        return 0;
+    const QDateTime time = QDateTime::fromString(value.toString(), Qt::ISODate);
+    if (!time.isValid())
+        return std::nullopt;
+    return time.toSecsSinceEpoch();
 }
 
 QJsonObject toJson(const Store &store, const Reminder &r) {
@@ -186,15 +195,6 @@ QString toText(const Store &store, const Reminder &r) {
     return oneLine(parts.join("  "));
 }
 
-// A monthly or yearly reminder keeps returning to the day it is set for.
-void anchor(Reminder &r) {
-    Repeat repeat = Repeat::parse(r.repeat);
-    if (repeat.unit != Repeat::Monthly && repeat.unit != Repeat::Yearly)
-        return;
-    repeat.anchorDay = r.due.day();
-    r.repeat = repeat.toString();
-}
-
 // "daily", "weekly", "every 2 weeks", "every monday" as a rule, or the rule
 // itself. A repeat needs a date, the one it has or today, and a rule that
 // names a day moves it to the next such day, as quick entry does, so "every
@@ -225,8 +225,7 @@ bool readRepeat(const QString &text, const QDate &today, Reminder &r) {
     if (r.due != date)
         r.lateFold = false;
     r.due = date;
-    r.repeat = repeat.toString();
-    anchor(r);
+    r.repeat = repeat.anchored(date, r.repeat);
     return true;
 }
 
@@ -250,9 +249,10 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
     const QDateTime now = QDateTime::currentDateTime();
     const QDate today = now.date();
     if (parser.isSet("list")) {
-        const TaskList *list = listNamed(store, parser.value("list"));
+        QString error;
+        const TaskList *list = listNamed(store, parser.value("list"), error);
         if (!list)
-            return QString("No list named %1. %2").arg(parser.value("list"), listNames(store));
+            return error;
         if (list->id != r.listId) {
             r.listId = list->id;
             r.sectionId = 0;
@@ -278,8 +278,9 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
             const QDate date = Dates::parseDate(text, today);
             if (!date.isValid())
                 return QString("Could not read %1 as a date. Try 2026-12-24, tomorrow, or \"next friday\".").arg(text);
+            if (r.due != date)
+                r.repeat = Repeat::parse(r.repeat).anchored(date);
             r.due = date;
-            anchor(r);
         }
     }
     if (parser.isSet("time")) {
@@ -294,7 +295,7 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
             r.dueMinutes = minutes;
             // A time needs a day: the next one the clock shows that time on.
             if (!r.due.isValid())
-                r.due = minutes > now.time().hour() * 60 + now.time().minute() ? today : today.addDays(1);
+                r.due = Dates::nextClockDate(minutes, now, r.lateFold);
         }
     }
     if (parser.isSet("repeat") && !readRepeat(parser.value("repeat"), today, r))
@@ -460,7 +461,7 @@ int edit(const QStringList &arguments) {
     if (command.parser.isSet("unflag"))
         r.flagged = false;
 
-    store.put(r);
+    store.put(r, r.lateFold);
     if (r.listId != listId) {
         // Its subtasks move with it.
         for (qint64 childId : store.childrenOf(id)) {
@@ -491,39 +492,63 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
     if (!ready(store))
         return 1;
     QVector<qint64> ids;
-    // Titles are read before anything is done: deleting a parent takes its
-    // subtasks with it, so one listed after it is gone by its turn.
-    QHash<qint64, QString> titles;
+    QHash<qint64, Reminder> selected;
     for (const QString &word : command.arguments()) {
         const qint64 id = word.toLongLong();
         const Reminder *r = store.reminder(id);
         if (!r)
             return fail("There is no reminder " + word + ". Nothing was changed.");
-        if (!titles.contains(id)) {
+        if (!selected.contains(id)) {
             ids << id;
-            titles.insert(id, r->title);
+            selected.insert(id, *r);
         }
     }
+    Failures failures(store);
+    Store::Tx tx(&store, {}, Store::Latest);
+    if (!tx)
+        return failures.report("Nothing was changed");
+    QVector<qint64> order = ids;
+    const bool completing = name == "done";
+    if (completing) {
+        // If another process moved an occurrence while the command waited for
+        // the write lock, the one offered at the start is no longer open.
+        order.removeIf([&](qint64 id) {
+            const Reminder &offered = selected[id];
+            const Reminder *current = store.reminder(id);
+            return offered.completed || offered.draft || !current || current->completed || current->draft ||
+                   current->occurrence() != offered.occurrence();
+        });
+        // A parent's last completion also completes its open children.
+        // Do it first, even if a child was named first on the command line.
+        std::stable_partition(order.begin(), order.end(), [&](qint64 id) { return !store.reminder(id)->parentId; });
+    }
+    QSet<qint64> acted;
+    for (qint64 id : std::as_const(order)) {
+        if (completing) {
+            const Reminder *current = store.reminder(id);
+            if (current->completed || current->occurrence() != selected[id].occurrence()) {
+                acted.insert(id); // its parent already completed the selected occurrence
+                continue;
+            }
+        }
+        if (action(store, id))
+            acted.insert(id);
+    }
+    if (!tx.commit() || failures.any())
+        return failures.report("Nothing was changed");
     QJsonArray changed;
     QStringList lines;
-    Failures failures(store);
-    {
-        Store::Tx tx(&store);
-        for (qint64 id : ids) {
-            const QString title = titles.value(id);
-            const bool acted = action(store, id);
-            const QString result = acted ? verb
-                                 : !store.reminder(id) ? "No longer there"
-                                 : name == "reopen" ? "Already open" : "Already completed or moved on";
-            lines << QString("%1 %2: %3").arg(result, QString::number(id), oneLine(title));
-            if (const Reminder *r = store.reminder(id))
-                changed << toJson(store, *r);
-            else
-                changed << QJsonObject{{"id", id}, {"title", title}, {"deleted", true}};
-        }
+    for (qint64 id : std::as_const(ids)) {
+        const QString title = selected[id].title;
+        const Reminder *r = store.reminder(id);
+        const QString result = acted.contains(id) ? verb : !r ? "No longer there"
+                             : name == "reopen" ? "Already open" : "Already completed or moved on";
+        lines << QString("%1 %2: %3").arg(result, QString::number(id), oneLine(title));
+        if (r)
+            changed << toJson(store, *r);
+        else
+            changed << QJsonObject{{"id", id}, {"title", title}, {"deleted", true}};
     }
-    if (failures.any())
-        return failures.report("Nothing was changed");
     if (command.wantsJson())
         print({{"reminders", changed}});
     else
@@ -586,9 +611,10 @@ int list(const QStringList &arguments) {
     // today in Home.
     QVector<View> filters;
     if (command.parser.isSet("list")) {
-        const TaskList *found = listNamed(store, command.parser.value("list"));
+        QString error;
+        const TaskList *found = listNamed(store, command.parser.value("list"), error);
         if (!found)
-            return fail(QString("No list named %1. %2").arg(command.parser.value("list"), listNames(store)));
+            return fail(error);
         filters << View{View::List, found->id, {}};
     }
     if (command.parser.isSet("tag")) {
@@ -687,9 +713,10 @@ int lists(const QStringList &arguments) {
         Store::Tx tx(&store, {}, Store::Latest);
         if (!tx)
             return failures.report("The list could not be deleted");
-        const TaskList *doomed = listNamed(store, name);
+        QString error;
+        const TaskList *doomed = listNamed(store, name, error);
         if (!doomed)
-            return fail(QString("No list named %1. %2").arg(name, listNames(store)));
+            return fail(error);
         const int holding = count(doomed->id, false);
         if (holding && !command.parser.isSet("force"))
             return fail(QString("%1 holds %2 reminders. Add --force to delete them with it.")
@@ -784,22 +811,29 @@ int exportAll(const QStringList &arguments) {
     return 0;
 }
 
-Reminder reminderFromBackup(const QJsonObject &entry, const QDate &today) {
+std::optional<Reminder> reminderFromBackup(const QJsonObject &entry, const QDate &today) {
     Reminder r;
     r.title = entry.value("title").toString();
     r.notes = entry.value("notes").toString();
     r.url = entry.value("url").toString();
     r.due = QDate::fromString(entry.value("due").toString(), Qt::ISODate);
+    r.repeatEnd = QDate::fromString(entry.value("repeatEnd").toString(), Qt::ISODate);
+    const QTime time = QTime::fromString(entry.value("time").toString(), "HH:mm");
+    auto valid = [&](const QString &key, const QString &formatted) {
+        const QJsonValue value = entry.value(key);
+        return value.isNull() || value.isUndefined() || (!formatted.isEmpty() && value.toString() == formatted);
+    };
+    if (!valid("due", r.due.toString(Qt::ISODate)) || !valid("repeatEnd", r.repeatEnd.toString(Qt::ISODate)) ||
+        !valid("time", time.toString("HH:mm")))
+        return std::nullopt;
     const bool hadDate = r.due.isValid();
     r.repeat = Repeat::parse(entry.value("repeat").toString()).toString();
     // Older backups could carry a repeat with no date. Start it as if its
     // rule were set today.
     if (!hadDate && !r.repeat.isEmpty())
         r.due = today;
-    const QTime time = QTime::fromString(entry.value("time").toString(), "HH:mm");
     r.dueMinutes = r.due.isValid() && time.isValid() ? time.hour() * 60 + time.minute() : -1;
     r.lateFold = hadDate && r.dueMinutes >= 0 && entry.value("lateFold").toBool();
-    r.repeatEnd = QDate::fromString(entry.value("repeatEnd").toString(), Qt::ISODate);
     r.early = entry.value("early").toInt();
     r.priority = qMax(0, int(priorities.indexOf(entry.value("priority").toString())));
     r.flagged = entry.value("flagged").toBool();
@@ -807,9 +841,13 @@ Reminder reminderFromBackup(const QJsonObject &entry, const QDate &today) {
         if (const QString text = tag.toString(); !text.trimmed().isEmpty())
             r.tags << text;
     r.completed = entry.value("completed").toBool();
-    r.completedAt = readMoment(entry, "completedAt");
-    r.createdAt = readMoment(entry, "createdAt");
-    r.snoozeUntil = r.completed || !hadDate ? 0 : readMoment(entry, "snoozeUntil");
+    const auto completed = readMoment(entry.value("completedAt")), created = readMoment(entry.value("createdAt")),
+               snooze = readMoment(entry.value("snoozeUntil"));
+    if (!completed || !created || !snooze)
+        return std::nullopt;
+    r.completedAt = *completed;
+    r.createdAt = *created;
+    r.snoozeUntil = r.completed || !hadDate ? 0 : *snooze;
     return r;
 }
 
@@ -850,7 +888,10 @@ int importAll(const QStringList &arguments) {
             return fail("The backup has invalid or duplicate reminder ids.");
         if (id > 0)
             parentOf.insert(id, parent);
-        imported.append({entry, reminderFromBackup(entry, today), qMax<qint64>(id, 0), parent});
+        const auto reminder = reminderFromBackup(entry, today);
+        if (!reminder)
+            return fail("A reminder in the backup has an invalid date or time.");
+        imported.append({entry, *reminder, qMax<qint64>(id, 0), parent});
     }
     QSet<qint64> neededParents;
     for (const Imported &row : std::as_const(imported)) {
@@ -865,11 +906,19 @@ int importAll(const QStringList &arguments) {
     QSet<QString> incomingNames;
     for (const Imported &row : std::as_const(imported))
         incomingNames.insert(row.entry.value("list").toString());
+    QSet<qint64> declaredLists;
     for (const QJsonValue &value : document.value("lists").toArray()) {
         const QJsonObject entry = value.toObject();
         if (entry.value("name").toString().trimmed().isEmpty() ||
             (entry.contains("sections") && !entry.value("sections").isArray()))
             return fail("The backup has an invalid list.");
+        const QJsonValue idValue = entry.value("id");
+        if (!idValue.isUndefined() && !idValue.isNull()) {
+            const qint64 id = idValue.toInteger();
+            if (id <= 0 || declaredLists.contains(id))
+                return fail("The backup has invalid or duplicate list ids.");
+            declaredLists.insert(id);
+        }
         incomingNames.insert(entry.value("name").toString());
     }
 
@@ -1030,7 +1079,7 @@ int importAll(const QStringList &arguments) {
     return 0;
 }
 
-int background(const QStringList &arguments) {
+int background(const QStringList &arguments, const QString &unitFile) {
     Command command("background", "Whether reminders arrive while the window is closed: background on, background off.");
     command.parser.addPositionalArgument("state", "on or off", "[on|off]");
     command.json();
@@ -1038,21 +1087,35 @@ int background(const QStringList &arguments) {
     const QString state = command.arguments().value(0);
     if (!state.isEmpty() && state != "on" && state != "off")
         return fail("Use nudge background, nudge background on, or nudge background off.");
-    if (!QFile::exists("/usr/lib/systemd/user/nudge.service"))
+    if (!QFile::exists(unitFile))
         return fail("Reminders in the background need Nudge installed as a package (bin/install).");
-    auto systemctl = [](const QStringList &more, QString *output) {
+    QString output, error;
+    auto systemctl = [&](const QStringList &more) {
         QProcess process;
         process.start("systemctl", QStringList{"--user"} + more);
-        if (!process.waitForFinished(8000))
+        if (!process.waitForFinished(8000) || process.exitStatus() != QProcess::NormalExit) {
+            error = process.errorString();
+            if (process.state() != QProcess::NotRunning) {
+                process.kill();
+                process.waitForFinished();
+            }
             return -1;
-        *output = QString::fromUtf8(process.readAllStandardOutput() + process.readAllStandardError()).trimmed();
+        }
+        output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        error = QString::fromUtf8(process.readAllStandardError()).trimmed();
+        if (error.isEmpty())
+            error = output.isEmpty() ? QString("systemctl exited with status %1").arg(process.exitCode()) : output;
         return process.exitCode();
     };
-    QString output;
-    if (!state.isEmpty() && systemctl({state == "on" ? "enable" : "disable", "--now", "nudge.service"}, &output) != 0)
-        return fail("systemctl could not turn background reminders " + state + ": " + output);
-    systemctl({"is-enabled", "nudge.service"}, &output);
-    const bool on = output == "enabled";
+    if (!state.isEmpty() && systemctl({state == "on" ? "enable" : "disable", "--now", "nudge.service"}) != 0)
+        return fail("systemctl could not turn background reminders " + state + ": " + error);
+    const int code = systemctl({"is-enabled", "nudge.service"});
+    const bool on = code == 0 && (output == "enabled" || output == "enabled-runtime");
+    static const QStringList off{"disabled", "masked", "masked-runtime", "linked", "linked-runtime",
+                                 "static", "indirect", "alias", "generated", "transient"};
+    const bool knownOff = (code == 0 || code == 1) && off.contains(output);
+    if (!on && !knownOff)
+        return fail(QString("Could not check background reminders: %1").arg(error));
     if (command.wantsJson())
         print({{"background", on}});
     else
@@ -1167,7 +1230,7 @@ bool isCliCommand(const QString &word) {
         .contains(word);
 }
 
-int runCli(const QStringList &arguments) {
+int runCli(const QStringList &arguments, const QString &unitFile) {
     const QString command = arguments.value(1);
     if (command == "add")
         return add(arguments);
@@ -1197,7 +1260,7 @@ int runCli(const QStringList &arguments) {
     if (command == "import")
         return importAll(arguments);
     if (command == "background")
-        return background(arguments);
+        return background(arguments, unitFile);
     if (command == "skill")
         return skill(arguments);
     return help(arguments);

@@ -76,31 +76,37 @@ or `on 24.12.` to tell Nudge the number is a date. Use `2026-12-24` for a date
 you can paste in any language. A named date in a title can take a year from
 1900 through 2199 directly. For other years use a comma, as in `Dec 1, 1200`,
 or write the date out as `1200-12-01`. The editable Date and Ends fields
-include the year so you can copy a date and paste it back. In the calendar,
-use the arrow keys to move a day or week, Page Up or Page Down to change
-months, and Return to pick a date.
+include the year so you can copy a date and paste it back. Changing the
+desktop language keeps the text you are typing in the Date field. In the
+calendar, use the arrow keys to move a day or week, Page Up or Page Down to
+change months, and Return to pick a date.
 
 For a time without am or pm, Nudge reads 1 to 7 as afternoon, 8 to 11 as
 morning, and 12 as noon. On a 12-hour clock that makes `5:30` 17:30.
 Type `5:30am` or `05:30` for an early time, or write
-`tomorrow morning at 6`. On their own, morning, afternoon, evening, and
-night after a date mean 09:00, 15:00, 18:00, and 21:00 respectively.
-`Tomorrow night at 12` is midnight at the end of tomorrow.
+`Friday morning at 6`. A time entered without a date uses the next time
+the clock shows it, including the second time when clocks go back.
+On their own, morning, afternoon, evening, and night after a date mean
+09:00, 15:00, 18:00, and 21:00 respectively. In `tomorrow night at 12`,
+you can also write `midnight` or `12:00am` for midnight at the end of tomorrow.
 
 Write `on Sunday` or `at midnight` to make the date or time clear in a title.
-Ranges such as `from 5pm to 6pm` and rules such as `every second Tuesday`
+Ranges such as `from 5 pm to 6 pm` and rules such as `every second Tuesday`
 stay in the title. `This Friday` includes today when today is Friday.
 
 A repeat on weekdays starts on Monday if its date falls on the weekend.
 With an explicit weekday, `every Friday` starts on the first Friday on or
 after the given start date. Type `every 2 weeks until 2027-06-01` to set an
-end date. An occurrence on the end date is included. If the day is absent
+end date. The due date can fall on the end date or earlier. If the day is absent
 from a month or year, a monthly or yearly reminder uses the last day of
-that month and keeps its original day for later occurrences.
+that month and keeps its original day for later occurrences, including
+when you edit the end date.
 
 Completing a repeat leaves a completed occurrence and moves the reminder
 forward. If you complete a one-off reminder that has a repeating subtask,
-the subtask's next occurrence becomes a reminder of its own in the same list.
+the subtask's next occurrence becomes a reminder of its own in the same list
+and section. You can name both IDs in one `nudge done` command. Each current
+occurrence is completed once, in either argument order.
 
 ## Shortcuts
 
@@ -118,7 +124,7 @@ in sight.
 | `Tab` / `Shift+Tab` | Make a subtask / back to a reminder of its own |
 | `X` | Fold or unfold subtasks |
 | `M` | Move to another list |
-| `Alt+↑` / `Alt+↓` | Move up or down, and on into the next section |
+| `Alt+↑` / `Alt+↓` | Move up or down. Crossing a section takes the reminder's subtasks with it. |
 | `O` | Open its link |
 | `Delete` or `Backspace` | Delete |
 | `T` / `Shift+T` / `W` | Due today / tomorrow / in a week |
@@ -138,6 +144,7 @@ in sight.
 
 While you rename a reminder, its row stays in view. Finish the title before
 scrolling. To move reminders by hand, select **Manual Order** in the sort menu.
+You can undo a change of sort order even after a command adds a reminder to the list.
 
 ## Reminders while the window is closed
 
@@ -152,8 +159,9 @@ early alert. If the due time falls before the snooze ends, it is covered by
 the snoozed alert. **Open** shows the reminder in the window.
 
 An all-day reminder alerts at 09:00. An early alert set a day or week ahead
-of it also arrives at 09:00 local time, even when the clocks change. For a
-reminder with a time, the lead measures elapsed time.
+of it also arrives at 09:00 local time, even when the clocks change. Pending
+alerts follow the local time zone. An alert already delivered stays delivered
+when you change zones. For a reminder with a time, the lead measures elapsed time.
 
 ## From the command line
 
@@ -181,6 +189,14 @@ including its spacing. For a repeating reminder, `nudge done` returns the
 ID of the reminder that moved forward. The entry in Completed has its own ID
 and is the one to pass to `nudge reopen`.
 
+Give each list a distinct name. If a command finds two lists with the same
+name in an older database, select one in the sidebar and press Return to rename it.
+To capture a specific reminder with its details, use
+`nudge open --reminder 12 --details --screenshot reminder.png`.
+
+`nudge background --json` reports `false` for a disabled service. If the
+service status cannot be read, the command writes the error to stderr and exits 1.
+
 ## Where things are
 
 Reminders live in `~/.local/share/nudge/nudge.db`, a SQLite file written
@@ -200,7 +216,8 @@ An older backup can contain a reminder with details and a blank title.
 It comes back as **Untitled reminder**. Import reports how many empty
 reminders it skipped. A repeat saved without a date starts today. A repeat
 set to Weekdays starts on Monday if today is a weekend.
-An invalid backup leaves the current reminders alone.
+Import rejects invalid dates and times, including a saved snooze, and lists
+that share an ID. An invalid backup leaves the current reminders alone.
 
 ## What it does not do
 

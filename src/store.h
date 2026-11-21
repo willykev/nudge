@@ -44,7 +44,7 @@ struct Reminder {
     QString title, notes, url;
     QDate due;           // invalid when there is no date
     int dueMinutes = -1; // minutes after midnight, -1 for all day
-    bool lateFold = false; // elapsed-time entry in the second hour when the clock goes back
+    bool lateFold = false; // the later instant when the clock shows this minute twice
     QString repeat;      // see recurrence.h
     QDate repeatEnd;
     int early = 0;       // minutes before due for an extra alert, 0 for none
@@ -68,6 +68,13 @@ struct Reminder {
     bool hasText() const; // title, notes, or link entered for a draft
     bool hasContent() const;
     bool sameContent(const Reminder &other) const; // ignores the bookkeeping
+    struct Occurrence {
+        QDate date;
+        int minutes = -1;
+        bool lateFold = false;
+        bool operator==(const Occurrence &) const = default;
+    };
+    Occurrence occurrence() const { return {due, dueMinutes, lateFold}; }
     qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
     qint64 earlySince() const { return earlyScheduledAt ? earlyScheduledAt : scheduledSince(); }
@@ -126,8 +133,8 @@ public:
     bool commit();
     // Each returns the id, or 0 when it could not be saved. An open reminder
     // reopens a completed parent, in the same step.
-    // An edit that moves a reminder uses the normal clock time unless a
-    // relative entry explicitly chose the later fold for the new time.
+    // An edit that moves a reminder uses the normal clock time unless an
+    // entry explicitly chose the later fold for the new time.
     qint64 put(Reminder reminder, bool keepFold = false);
     qint64 put(TaskList list);
     qint64 put(Section section);

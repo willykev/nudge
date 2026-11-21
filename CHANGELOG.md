@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-Fixes from a review of 0.1.3.
-
 ### Saving
 
 - A window that has not caught up with another window or a command no
@@ -27,6 +25,8 @@ Fixes from a review of 0.1.3.
   snoozes travel with a backup, and large backups restore faster. Older
   backups keep untitled reminders with details and give repeats without a
   date a starting day. Import reports any empty reminders it skips.
+- Import refuses invalid dates and times and duplicate list IDs before
+  changing any lists or reminders.
 
 ### Alerts
 
@@ -39,6 +39,9 @@ Fixes from a review of 0.1.3.
 - **Open** on an alert shows its reminder, including alerts sent while the
   window was closed. If the reminder has since been deleted, it brings the
   existing window forward.
+- Early and due alerts already delivered stay quiet after a time zone
+  change. Editing the early lead while a due alert is being sent keeps
+  that delivery recorded.
 
 ### Privacy
 
@@ -58,6 +61,10 @@ Fixes from a review of 0.1.3.
 - List names are matched exactly when there is an exact match. Search takes a
   tag as it is shown, for example `#health`, and `--literal` keeps the spaces
   in a title. A failed skill install keeps the existing skill where it was.
+- Completing a parent and its repeating subtask in one `nudge done` command
+  leaves the next occurrence open, whichever ID comes first.
+- A failed `nudge background` status check prints the error and exits 1.
+  `nudge open --screenshot` uses the reminder selected with `--reminder`.
 
 ### Dates and repeats
 
@@ -69,6 +76,12 @@ Fixes from a review of 0.1.3.
 - Weekday repeats start on a day their rule includes. Completed occurrences
   stay in Completed when their parent moves forward. A repeating subtask
   carries on in its list when its one-off parent is completed.
+- A time entered on its own can fall in the second occurrence of a repeated
+  hour. `Friday morning at 6` and a written date followed by `morning at 6`
+  both use 06:00. `Tomorrow night at midnight` uses the end of tomorrow, and
+  ranges such as `from 5 pm to 6 pm` stay together in the title.
+- Editing a repeat's end date keeps its original day of the month or year.
+  The window and command line refuse a due date past the end of a repeat.
 
 ### Window
 
@@ -79,6 +92,10 @@ Fixes from a review of 0.1.3.
 - The editable Date and Ends fields include the year. A language change keeps
   the selected repeat, early alert, and priority. The list deletion question
   groups digits in large counts.
+- Moving a reminder into the next section takes its subtasks with it.
+  Undo can restore a list's sort order after a command adds a reminder.
+- A language change preserves a date still being typed. The list editor
+  refuses duplicate names, and commands explain how to rename an existing pair.
 
 ### Accessibility
 

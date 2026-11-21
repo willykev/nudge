@@ -9,6 +9,7 @@ TextField {
     id: field
     property string value: ""
     property var save: null
+    property bool edited: false
     readonly property var ui: look.colors
 
     font.family: look.fontFamily
@@ -37,6 +38,7 @@ TextField {
     function showValue() {
         if (!save)
             return
+        edited = false
         text = value
         if (!activeFocus)
             cursorPosition = 0
@@ -45,7 +47,8 @@ TextField {
         if (save && text !== value)
             save(text)
     }
-    onValueChanged: showValue()
+    onTextEdited: edited = true
+    onValueChanged: if (!edited) showValue()
     Component.onCompleted: showValue()
     onEditingFinished: {
         flush()
