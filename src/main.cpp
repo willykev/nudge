@@ -4,14 +4,17 @@
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QImageWriter>
 #include <QProcessEnvironment>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSaveFile>
 #include <QStyleHints>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -209,6 +212,10 @@ int main(int argc, char *argv[]) {
     }
     if (args.isSet("details"))
         window->setProperty("detailsVisible", true);
+    if (screenshot && reminder && !backend.selectReminder(reminder)) {
+        fprintf(stderr, "%s\n", qPrintable(QString("Could not select reminder %1 for the picture.").arg(reminder)));
+        return 1;
+    }
     if (args.isSet("help-overlay"))
         window->setProperty("helpVisible", true);
     if (args.isSet("show"))
@@ -221,9 +228,19 @@ int main(int argc, char *argv[]) {
             backend.revealReminder(store.path(), reminder);
     }
     if (screenshot) {
-        QTimer::singleShot(900, &app, [&] {
+        const QString path = args.value("screenshot");
+        const QByteArray format = QFileInfo(path).suffix().toLower().toLatin1();
+        if (!QImageWriter::supportedImageFormats().contains(format)) {
+            fprintf(stderr, "%s\n", qPrintable(QString("Unknown picture format for %1.").arg(path)));
+            return 1;
+        }
+        QTimer::singleShot(900, &app, [&, path, format] {
             auto *quick = qobject_cast<QQuickWindow *>(window);
-            const bool saved = quick && quick->grabWindow().save(args.value("screenshot"));
+            QSaveFile file(path);
+            const bool saved = quick && file.open(QIODevice::WriteOnly) &&
+                               quick->grabWindow().save(&file, format.constData()) && file.commit();
+            if (!saved)
+                fprintf(stderr, "%s\n", qPrintable(QString("Could not write %1.").arg(path)));
             app.exit(saved ? 0 : 1);
         });
     }

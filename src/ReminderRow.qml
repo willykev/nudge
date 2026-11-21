@@ -133,7 +133,7 @@ Item {
     }
     TapHandler {
         acceptedButtons: Qt.RightButton
-        onTapped: { app.select(row.rid); app.openRowMenu() }
+        onTapped: if (app.select(row.rid)) app.openRowMenu()
     }
 
     // A subtask hangs from a line dropped from its parent's box.
@@ -186,8 +186,8 @@ Item {
             Accessible.onPressAction: box.toggle()
             Accessible.onToggleAction: box.toggle()
             function toggle() {
-                app.select(row.rid)
-                backend.toggleCompleted(row.rid)
+                if (app.select(row.rid))
+                    backend.toggleCompleted(row.rid)
             }
             radius: Math.min(app.corner, 7.5)
             color: row.done ? app.chosen : boxHover.hovered ? app.cursorFill : "transparent"

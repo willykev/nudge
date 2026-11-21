@@ -9,6 +9,11 @@ TextField {
     id: field
     property string value: ""
     property var save: null
+    property string storedValue: value
+    property string initialText: ""
+    property var editSource: null
+    property var original: null
+    property bool edited: false
     readonly property var ui: look.colors
 
     font.family: look.fontFamily
@@ -37,15 +42,32 @@ TextField {
     function showValue() {
         if (!save)
             return
+        edited = false
+        original = null
+        initialText = value
         text = value
         if (!activeFocus)
             cursorPosition = 0
     }
     function flush() {
-        if (save && text !== value)
-            save(text)
+        if (save && edited) {
+            const source = original
+            edited = false
+            save(text, source)
+            showValue()
+        }
     }
-    onValueChanged: showValue()
+    onTextEdited: {
+        if (!save)
+            return
+        if (!edited)
+            original = editSource
+        edited = text !== initialText
+        if (!edited)
+            showValue()
+    }
+    onStoredValueChanged: showValue()
+    onValueChanged: if (!edited) showValue()
     Component.onCompleted: showValue()
     onEditingFinished: {
         flush()

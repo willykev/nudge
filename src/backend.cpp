@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include "cli.h"
 #include "dates.h"
 #include "recurrence.h"
 
@@ -19,15 +20,6 @@
 namespace {
 const QStringList repeatUnits{"never", "daily", "weekdays", "weekly", "monthly", "yearly"};
 const QStringList sortModes{"manual", "due", "priority", "title", "created"};
-
-// A monthly or yearly reminder keeps returning to the day it is set for.
-void anchor(Reminder &r) {
-    Repeat repeat = Repeat::parse(r.repeat);
-    if (repeat.unit != Repeat::Monthly && repeat.unit != Repeat::Yearly)
-        return;
-    repeat.anchorDay = r.due.day();
-    r.repeat = repeat.toString();
-}
 } // namespace
 
 Backend::Backend(Store *store, QObject *parent)
@@ -453,8 +445,7 @@ void Backend::stepView(int delta) {
     setViewKey(entries[next].key);
 }
 
-void Backend::reveal(qint64 id) {
-    m_store->reloadIfChanged();
+bool Backend::selectReminder(qint64 id) {
     if (const Reminder *r = m_store->reminder(id)) {
         const Reminder target = *r;
         if (m_collapsed.remove(target.parentId))
@@ -463,7 +454,14 @@ void Backend::reveal(qint64 id) {
             setViewKey(target.completed ? QStringLiteral("completed") : "list:" + QString::number(target.listId));
         setSelectedId(id);
         emit revealSelection();
+        return m_selectedId == id && m_model->rowOf(id) >= 0;
     }
+    return false;
+}
+
+void Backend::reveal(qint64 id) {
+    m_store->reloadIfChanged();
+    selectReminder(id);
     emit raise();
     focusNudgeWindow(QCoreApplication::applicationPid());
 }
@@ -488,9 +486,13 @@ QVariantMap Backend::selected() const {
         {"title", r->title},
         {"notes", r->notes},
         {"url", r->url},
+        {"locale", QLocale().name()},
+        {"todayWord", tr("Today")}, {"tomorrowWord", tr("Tomorrow")}, {"yesterdayWord", tr("Yesterday")},
         {"date", Dates::formatEditableDate(r->due)},
         {"dateIso", r->due.isValid() ? r->due.toString(Qt::ISODate) : QString()},
         {"time", Dates::formatTime(r->dueMinutes)},
+        {"minutes", r->dueMinutes}, {"lateFold", r->lateFold},
+        {"endIso", r->repeatEnd.toString(Qt::ISODate)},
         {"repeatUnit", repeatUnits.value(repeat.unit)},
         {"repeatInterval", repeat.interval},
         {"repeatEnd", Dates::formatEditableDate(r->repeatEnd)},
@@ -621,26 +623,27 @@ qint64 Backend::addReminder() {
     return id;
 }
 
-void Backend::commitTitle(qint64 id, const QString &text) {
+bool Backend::commitTitle(qint64 id, const QString &text) {
     const Reminder *existing = m_store->reminder(id);
     if (!existing)
-        return;
+        return true; // the row was removed while it was being edited
     const QString title = text.simplified();
     if (id != m_draftId) {
-        if (!title.isEmpty())
-            setTitle(id, title);
-        return;
+        return title.isEmpty() || edit(id, "title", [&title](Reminder &r) { r.title = title; });
     }
     // Named in the list with nothing, one the details pane is filling in
     // keeps what the pane gave it, and is settled when it is left.
     if (title.isEmpty() && m_draftHeld)
-        return;
+        return true;
 
     const QString key = m_draftKey;
-    m_draftId = 0;
-    m_draftHeld = false;
-    emit draftChanged();
+    auto release = [this] {
+        m_draftId = 0;
+        m_draftHeld = false;
+        emit draftChanged();
+    };
     if (title.isEmpty()) {
+        release();
         // Nothing was typed, so nothing was added, and nothing is left to undo.
         // The selection goes back to where it was, unless the window has
         // already moved it on.
@@ -649,7 +652,7 @@ void Backend::commitTitle(qint64 id, const QString &text) {
         m_store->removeEmptyDraft(id);
         if (selected && m_store->reminder(m_beforeDraft) && m_model->rowOf(m_beforeDraft) >= 0)
             setSelectedId(m_beforeDraft);
-        return;
+        return true;
     }
 
     const QuickEntry entry = Dates::parseQuick(title, now());
@@ -671,9 +674,12 @@ void Backend::commitTitle(qint64 id, const QString &text) {
                 r.tags << tag;
         if (entry.priority)
             r.priority = entry.priority;
-        m_store->put(r, entry.lateFold);
+        if (!m_store->put(r, entry.lateFold) || !tx.commit())
+            return false;
     }
+    release();
     m_store->sealUndo();
+    refresh();
 
     // Typing "tomorrow" in Today sends the reminder out of sight; say where.
     const Reminder *saved = m_store->reminder(id);
@@ -683,6 +689,7 @@ void Backend::commitTitle(qint64 id, const QString &text) {
                         ? tr("Saved for %1").arg(Dates::formatDue(saved->due, saved->dueMinutes, now().date()))
                         : tr("Saved to %1").arg(list ? list->name : QString()));
     }
+    return true;
 }
 
 void Backend::holdDraft(qint64 id) {
@@ -737,10 +744,10 @@ bool Backend::edit(qint64 id, const QString &what, const std::function<void(Remi
         return false;
     Reminder r = *existing;
     change(r);
+    const bool choseFold = r.lateFold && !existing->lateFold;
     // Keystrokes in one field of one reminder undo together.
     Store::Tx tx(m_store, stepKey(id, what.isEmpty() ? QString() : QString("%1:%2").arg(what, QString::number(id))));
-    m_store->put(r);
-    return true;
+    return tx && m_store->put(r, choseFold) && tx.commit();
 }
 
 // A change to a reminder still being added is part of adding it, so one
@@ -784,17 +791,13 @@ void Backend::setPriority(qint64 id, int priority) {
     edit(id, {}, [priority](Reminder &r) { r.priority = qBound(0, priority, 3); });
 }
 
-void Backend::setDueIn(qint64 id, int days) {
-    const QDate date = now().date().addDays(days);
-    edit(id, {}, [date](Reminder &r) {
-        r.due = date;
-        anchor(r);
-    });
+bool Backend::setDueIn(qint64 id, int days) {
+    return setDueDate(id, now().date().addDays(days));
 }
 
-void Backend::clearDue(qint64 id) {
+bool Backend::clearDue(qint64 id) {
     // Without a date there is nothing to repeat or to alert ahead of.
-    edit(id, {}, [](Reminder &r) {
+    return edit(id, {}, [](Reminder &r) {
         r.due = QDate();
         r.dueMinutes = -1;
         r.repeat.clear();
@@ -966,7 +969,7 @@ void Backend::moveReminder(qint64 id, int delta) {
                 first = qMin(first, other.position);
         moved.position = first - 1;
     }
-    m_store->put(moved);
+    moveFamilyToSection(moved);
 }
 
 void Backend::moveToList(qint64 id, qint64 listId) {
@@ -1012,11 +1015,15 @@ void Backend::moveToSection(qint64 id, qint64 sectionId) {
     moved.sectionId = sectionId;
     moved.parentId = 0;
     moved.position = m_store->endPosition(moved.listId);
-    const QVector<qint64> children = m_store->childrenOf(id);
+    moveFamilyToSection(moved);
+}
+
+void Backend::moveFamilyToSection(const Reminder &moved) {
+    const QVector<qint64> children = m_store->childrenOf(moved.id);
     m_store->put(moved);
     for (qint64 childId : children) {
         Reminder child = *m_store->reminder(childId);
-        child.sectionId = sectionId;
+        child.sectionId = moved.sectionId;
         m_store->put(child);
     }
 }
@@ -1037,6 +1044,41 @@ void Backend::openLink(qint64 id) {
 
 // ---- The details pane ----------------------------------------------------------
 
+// A field may finish before the file watcher sees an outside edit. Compare
+// its original occurrence and value with the row under the write lock.
+void Backend::saveDetail(const QVariantMap &original, const QString &field, const QString &text) {
+    const qint64 id = original.value("id").toLongLong();
+    const bool mergeText = field == "title" || field == "url" || field == "tags";
+    const QString key = mergeText ? field + ":" + QString::number(id) : QString();
+    Store::Tx tx(m_store, stepKey(id, key), Store::Latest);
+    const Reminder *r = tx ? m_store->reminder(id) : nullptr;
+    if (!r || r->due.toString(Qt::ISODate) != original.value("dateIso").toString() ||
+        r->dueMinutes != original.value("minutes").toInt() || r->lateFold != original.value("lateFold").toBool() ||
+        r->completed != original.value("done").toBool())
+        return;
+    const QLocale locale(original.value("locale").toString());
+    if (field == "date" || field == "repeatEnd") {
+        QString date = text.trimmed();
+        for (const QString word : {"today", "tomorrow", "yesterday"})
+            if (date.compare(original.value(word + "Word").toString(), Qt::CaseInsensitive) == 0) {
+                date = word;
+                break;
+            }
+        if (field == "date")
+            setDate(id, date, locale);
+        else if (r->repeatEnd.toString(Qt::ISODate) == original.value("endIso").toString() && !r->repeat.isEmpty())
+            setRepeatEnd(id, date, locale);
+    } else if (field == "time") {
+        setTime(id, text, locale);
+    } else if (field == "title" && r->title == original.value(field).toString()) {
+        setTitle(id, text);
+    } else if (field == "url" && r->url == original.value(field).toString()) {
+        setUrl(id, text);
+    } else if (field == "tags" && r->tags.join(' ') == original.value(field).toString()) {
+        setTags(id, text);
+    }
+}
+
 void Backend::setTitle(qint64 id, const QString &text) {
     const QString title = text.simplified();
     if (!title.isEmpty())
@@ -1051,50 +1093,49 @@ void Backend::setUrl(qint64 id, const QString &text) {
     edit(id, "url", [&text](Reminder &r) { r.url = text.trimmed(); });
 }
 
-bool Backend::setDate(qint64 id, const QString &text) {
+bool Backend::setDate(qint64 id, const QString &text, const QLocale &locale) {
     if (text.trimmed().isEmpty()) {
-        clearDue(id);
-        return true;
+        return clearDue(id);
     }
-    const QDate date = Dates::parseDate(text, now().date());
+    const QDate date = Dates::parseDate(text, now().date(), locale);
     if (!date.isValid()) {
         emit notice(tr("“%1” is not a date Nudge understands").arg(text.trimmed()));
         return false;
     }
-    setDateIso(id, date.toString(Qt::ISODate));
-    return true;
+    return setDueDate(id, date);
 }
 
-void Backend::setDateIso(qint64 id, const QString &iso) {
-    const QDate date = QDate::fromString(iso, Qt::ISODate);
+bool Backend::setDateIso(qint64 id, const QString &iso) {
+    return setDueDate(id, QDate::fromString(iso, Qt::ISODate));
+}
+
+bool Backend::setDueDate(qint64 id, const QDate &date) {
     if (!date.isValid())
-        return;
-    edit(id, {}, [date](Reminder &r) {
+        return false;
+    return edit(id, {}, [date](Reminder &r) {
+        if (r.due != date)
+            r.repeat = Repeat::parse(r.repeat).anchored(date);
         r.due = date;
-        anchor(r);
     });
 }
 
-bool Backend::setTime(qint64 id, const QString &text) {
+bool Backend::setTime(qint64 id, const QString &text, const QLocale &locale) {
     if (text.trimmed().isEmpty()) {
         edit(id, {}, [](Reminder &r) { r.dueMinutes = -1; });
         return true;
     }
-    const int minutes = Dates::parseTime(text);
+    const int minutes = Dates::parseTime(text, locale);
     if (minutes < 0) {
         emit notice(tr("“%1” is not a time Nudge understands").arg(text.trimmed()));
         return false;
     }
     const QDateTime moment = now();
-    edit(id, {}, [&](Reminder &r) {
+    return edit(id, {}, [&](Reminder &r) {
         r.dueMinutes = minutes;
         // A time needs a day: the next one the clock shows that time on.
-        if (!r.due.isValid()) {
-            const bool ahead = minutes > moment.time().hour() * 60 + moment.time().minute();
-            r.due = ahead ? moment.date() : moment.date().addDays(1);
-        }
+        if (!r.due.isValid())
+            r.due = Dates::nextClockDate(minutes, moment, r.lateFold);
     });
-    return true;
 }
 
 void Backend::setRepeat(qint64 id, const QString &unit, int interval) {
@@ -1108,25 +1149,22 @@ void Backend::setRepeat(qint64 id, const QString &unit, int interval) {
     edit(id, "repeat", [&](Reminder &r) {
         if (repeat.repeats() && !r.due.isValid())
             r.due = today;
-        if (repeat.unit == Repeat::Monthly || repeat.unit == Repeat::Yearly)
-            repeat.anchorDay = r.due.day();
-        r.repeat = repeat.toString();
+        r.repeat = repeat.anchored(r.due, r.repeat);
         if (!repeat.repeats())
             r.repeatEnd = QDate();
     });
 }
 
-bool Backend::setRepeatEnd(qint64 id, const QString &text) {
+bool Backend::setRepeatEnd(qint64 id, const QString &text, const QLocale &locale) {
     QDate date;
     if (!text.trimmed().isEmpty()) {
-        date = Dates::parseDate(text, now().date());
+        date = Dates::parseDate(text, now().date(), locale);
         if (!date.isValid()) {
             emit notice(tr("“%1” is not a date Nudge understands").arg(text.trimmed()));
             return false;
         }
     }
-    edit(id, {}, [date](Reminder &r) { r.repeatEnd = date; });
-    return true;
+    return edit(id, {}, [date](Reminder &r) { r.repeatEnd = date; });
 }
 
 void Backend::setEarly(qint64 id, int minutes) {
@@ -1170,28 +1208,49 @@ QVariantList Backend::sections() const {
     return result;
 }
 
+bool Backend::listNameAvailable(const QString &name, qint64 except) {
+    for (const TaskList &list : m_store->lists()) {
+        if (list.id != except && list.name == name) {
+            emit notice(tr("A list named “%1” already exists.").arg(name));
+            return false;
+        }
+    }
+    return true;
+}
+
 qint64 Backend::addList(const QString &name, const QString &color) {
+    Store::Tx tx(m_store, {}, Store::Latest);
     const QStringList colors = palette();
     TaskList list;
-    list.name = name.simplified().isEmpty() ? tr("New List") : name.simplified();
+    list.name = name.simplified();
+    if (list.name.isEmpty())
+        list.name = tr("New List");
+    if (!tx || !listNameAvailable(list.name))
+        return 0;
     list.color = QColor::isValidColorName(color) ? color : colors[m_store->lists().size() % colors.size()];
     list.position = m_store->lists().isEmpty() ? 1 : m_store->lists().last().position + 1;
     const qint64 id = m_store->put(list);
-    if (id)
-        setViewKey("list:" + QString::number(id));
+    if (!id || !tx.commit())
+        return 0;
+    setViewKey("list:" + QString::number(id));
     return id;
 }
 
-void Backend::updateList(qint64 id, const QString &name, const QString &color) {
+bool Backend::updateList(qint64 id, const QString &name, const QString &color) {
+    Store::Tx tx(m_store, {}, Store::Latest);
     const TaskList *existing = m_store->list(id);
-    if (!existing)
-        return;
+    if (!tx || !existing)
+        return false;
     TaskList list = *existing;
-    if (!name.simplified().isEmpty())
-        list.name = name.simplified();
+    const QString renamed = name.simplified();
+    if (!renamed.isEmpty() && renamed != list.name) {
+        if (!listNameAvailable(renamed, id))
+            return false;
+        list.name = renamed;
+    }
     if (QColor::isValidColorName(color))
         list.color = color;
-    m_store->put(list);
+    return m_store->put(list) && tx.commit();
 }
 
 void Backend::removeList(qint64 id) {
@@ -1364,20 +1423,26 @@ bool Backend::backgroundAvailable() const {
 }
 
 bool Backend::backgroundAsk() const {
-    return backgroundAvailable() && !m_backgroundOn && !m_backgroundAsked;
+    return backgroundAvailable() && m_backgroundOn == false && !m_backgroundAsked;
 }
 
 void Backend::checkBackground() {
-    bool on = false;
+    m_backgroundOn.reset();
     if (backgroundAvailable()) {
         QProcess process;
         process.start(m_systemctl, {"--user", "is-enabled", "nudge.service"});
-        if (process.waitForFinished(2000))
-            on = process.readAllStandardOutput().trimmed() == "enabled";
-        else
+        if (process.waitForFinished(2000) && process.exitStatus() == QProcess::NormalExit) {
+            const QString output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+            m_backgroundOn = backgroundEnabled(output, process.exitCode());
+            m_backgroundError = QString::fromUtf8(process.readAllStandardError()).trimmed();
+            if (m_backgroundError.isEmpty())
+                m_backgroundError = output.isEmpty() ? tr("systemctl exited with status %1").arg(process.exitCode()) : output;
+        } else {
+            m_backgroundError = process.errorString();
             process.kill();
+            process.waitForFinished();
+        }
     }
-    m_backgroundOn = on;
     emit backgroundChanged();
 }
 
@@ -1385,6 +1450,15 @@ void Backend::setBackground(bool on) {
     if (!backgroundAvailable()) {
         emit notice(tr("Reminders in the background need Nudge installed as a package"));
         return;
+    }
+    if (!m_backgroundOn.has_value()) {
+        checkBackground();
+        if (!m_backgroundOn.has_value()) {
+            emit notice(tr("Could not check background reminders: %1").arg(m_backgroundError));
+            return;
+        }
+        if (m_backgroundOn == on)
+            return;
     }
     QProcess process;
     process.start(m_systemctl, {"--user", on ? "enable" : "disable", "--now", "nudge.service"});

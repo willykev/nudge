@@ -15,6 +15,7 @@
 #include <QScopedValueRollback>
 #include <QVariantMap>
 #include <algorithm>
+#include <utility>
 
 namespace {
 const QString notifications = QStringLiteral("org.freedesktop.Notifications");
@@ -209,11 +210,6 @@ void Notifier::check(const QDateTime &now) {
     m_store->reloadIfChanged();
     const qint64 seconds = now.toSecsSinceEpoch();
     const QTimeZone zone = now.timeRepresentation();
-    struct Pending {
-        qint64 id;
-        qint64 dueAt, earlyAt, when;
-        bool early, due, snoozed;
-    };
     QVector<Pending> pending;
     qint64 nextAt = 0;
     auto later = [&](qint64 at) {
@@ -221,10 +217,9 @@ void Notifier::check(const QDateTime &now) {
             nextAt = at;
     };
 
-    for (const Reminder &r : m_store->reminders()) {
-        // One still being typed has no title yet, and nothing to announce.
+    auto candidate = [&](const Reminder &r) -> std::optional<Pending> {
         if (r.completed || r.draft || !r.due.isValid())
-            continue;
+            return std::nullopt;
         const qint64 dueAt = r.dueAt(zone);
         qint64 earlyAt = r.early > 0 ? dueAt - 60LL * r.early : 0;
         if (r.dueMinutes < 0 && r.early > 0 && r.early % 1440 == 0)
@@ -238,20 +233,24 @@ void Notifier::check(const QDateTime &now) {
         // afternoon should not alert at once. Other edits, like its notes,
         // leave that alone.
         if (r.snoozeUntil > seconds)
-            continue;
-        Pending p{r.id, dueAt, earlyAt, 0, false, false, false};
-        p.snoozed = r.snoozeUntil && r.snoozeUntil <= seconds;
-        p.early = !p.snoozed && earlyAt && earlyAt <= seconds && dueAt > seconds && r.alertedDue != dueAt &&
-                  r.alertedEarly != earlyAt && earlyAt >= r.earlySince() - 60;
-        p.due = dueAt <= seconds && r.alertedDue != dueAt && dueAt >= r.scheduledSince() - 60;
-        p.when = p.snoozed ? r.snoozeUntil : p.due ? dueAt : earlyAt;
-        if (p.early || p.due || p.snoozed)
-            pending.append(p);
-    }
+            return std::nullopt;
+        const bool snoozed = r.snoozeUntil != 0;
+        // The store clears each delivery mark when its local occurrence or lead changes.
+        // A new time zone can change the UTC instant of an occurrence already announced.
+        const bool early = !snoozed && earlyAt && earlyAt <= seconds && dueAt > seconds && !r.alertedDue &&
+                           !r.earlyConfirmed && r.alertedEarly != earlyAt && earlyAt >= r.earlySince() - 60;
+        const bool due = dueAt <= seconds && !r.alertedDue && dueAt >= r.scheduledSince() - 60;
+        if (early || due || snoozed)
+            return Pending{r, dueAt, earlyAt, snoozed ? r.snoozeUntil : due ? dueAt : earlyAt, early, due, snoozed};
+        return std::nullopt;
+    };
+    for (const Reminder &r : m_store->reminders())
+        if (auto p = candidate(r))
+            pending.append(*p);
 
     if (!pending.isEmpty() && m_alerts->mayAlert()) {
         std::sort(pending.begin(), pending.end(), [](const Pending &a, const Pending &b) {
-            return a.when != b.when ? a.when < b.when : a.id < b.id;
+            return a.when != b.when ? a.when < b.when : a.reminder.id < b.reminder.id;
         });
         const QDate today = now.date();
         // Where the desktop reads the body as markup, a & or < in a title, a
@@ -259,18 +258,42 @@ void Notifier::check(const QDateTime &now) {
         // the body is meant as markup, so there all of it is escaped.
         const bool markup = m_alerts->bodyMarkup();
         auto asBody = [markup](const QString &text) { return markup ? text.toHtmlEscaped() : text; };
-        auto mark = [&](const Pending &p) {
-            const Reminder *r = m_store->reminder(p.id);
-            const bool pastDue = p.due || (p.snoozed && p.dueAt <= seconds);
-            const bool pastEarly = p.early || (p.snoozed && p.earlyAt <= seconds);
-            m_store->setAlerted(p.id, pastDue ? p.dueAt : r->alertedDue, pastEarly ? p.earlyAt : r->alertedEarly,
-                                p.snoozed ? 0 : r->snoozeUntil);
+        auto current = [&](const Pending &p) -> std::optional<Pending> {
+            const Reminder *r = m_store->reminder(p.reminder.id);
+            auto latest = r ? candidate(*r) : std::nullopt;
+            return latest && latest->sameAlert(p) ? latest : std::nullopt;
         };
+        auto mark = [&](const Pending &p) {
+            // Sending goes through the desktop. Another writer may have changed the
+            // reminder in the meantime. Mark only the occurrence and lead actually sent.
+            const Reminder *r = m_store->reminder(p.reminder.id);
+            if (!r || r->completed || r->occurrence() != p.reminder.occurrence())
+                return;
+            const bool pastDue = p.due || (p.snoozed && p.dueAt <= seconds);
+            const bool pastEarly = r->early == p.reminder.early && (p.early || (p.snoozed && p.earlyAt <= seconds));
+            const bool woke = p.snoozed && r->snoozeUntil == p.reminder.snoozeUntil;
+            if (!m_store->setAlerted(r->id, pastDue ? p.dueAt : r->alertedDue,
+                                     pastEarly ? std::optional(p.earlyAt) : std::nullopt, woke ? 0 : r->snoozeUntil))
+                m_unrecorded.insert(p.reminder.id, p);
+        };
+        m_store->reloadIfChanged();
+        const auto unrecorded = std::exchange(m_unrecorded, {});
+        for (const Pending &sent : unrecorded)
+            if (current(sent))
+                mark(sent); // retry the write without sending the notification again
+        if (!unrecorded.isEmpty())
+            m_store->reloadIfChanged();
+        for (const Pending &queued : std::exchange(pending, {})) {
+            const auto latest = current(queued);
+            const auto sent = unrecorded.constFind(queued.reminder.id);
+            if (latest && (sent == unrecorded.cend() || !sent->sameAlert(*latest)))
+                pending.append(*latest);
+        }
         if (pending.size() > 3) {
             // After a night off there may be a pile; say so once.
             QStringList titles;
             for (int i = 0; i < pending.size() && i < 5; ++i)
-                titles << m_store->reminder(pending[i].id)->title;
+                titles << pending[i].reminder.title;
             if (pending.size() > 5)
                 titles << QStringLiteral("…");
             const bool allEarly = std::all_of(pending.cbegin(), pending.cend(), [](const Pending &p) { return p.early; });
@@ -282,30 +305,35 @@ void Notifier::check(const QDateTime &now) {
             const QString body = asBody(titles.join('\n'));
             const quint32 shown = m_alerts->show(title, body, {"default", tr("Open")});
             if (shown) {
-                m_shown.insert(shown, {0, 0, title, body});
+                m_shown.insert(shown, {0, {}, title, body});
                 for (const Pending &p : pending)
                     mark(p);
             }
         } else {
-            for (const Pending &p : pending) {
-                const Reminder *r = m_store->reminder(p.id);
-                const TaskList *list = m_store->list(r->listId);
-                QStringList body{Dates::formatDue(r->due, r->dueMinutes, today)};
+            for (const Pending &queued : pending) {
+                m_store->reloadIfChanged();
+                const auto latest = current(queued);
+                if (!latest)
+                    continue;
+                const Pending &p = *latest;
+                const Reminder &r = p.reminder;
+                const TaskList *list = m_store->list(r.listId);
+                QStringList body{Dates::formatDue(r.due, r.dueMinutes, today)};
                 if (list)
                     body << list->name;
                 QString text = body.join(QStringLiteral(" · "));
                 if (p.early && !p.due)
                     text = tr("Coming up: %1").arg(text);
-                if (!r->notes.isEmpty())
-                    text += '\n' + r->notes.section('\n', 0, 0);
+                if (!r.notes.isEmpty())
+                    text += '\n' + r.notes.section('\n', 0, 0);
                 text = asBody(text);
-                const QString title = r->title.isEmpty() ? tr("Reminder") : r->title;
+                const QString title = r.title.isEmpty() ? tr("Reminder") : r.title;
                 const quint32 shown =
                     m_alerts->show(title, text,
                                    {"default", tr("Open"), "done", tr("Complete"), "hour", tr("In an Hour"),
                                     "tomorrow", tr("Tomorrow")});
                 if (shown) {
-                    m_shown.insert(shown, {p.id, p.dueAt, title, text});
+                    m_shown.insert(shown, {r.id, r.occurrence(), title, text});
                     mark(p);
                 }
             }
@@ -327,7 +355,6 @@ void Notifier::act(quint32 notification, const QString &action, const QDateTime 
         emit opened(id);
         return;
     }
-    m_shown.remove(notification);
     // The buttons answer for the moment the alert announced. Once that was
     // dealt with some other way (the reminder completed, given another date
     // or deleted, or a repeat gone on to its next date), a late click must
@@ -336,17 +363,25 @@ void Notifier::act(quint32 notification, const QString &action, const QDateTime 
     {
         const QScopedValueRollback checking(m_checking, true);
         Store::Tx tx(m_store, {}, Store::Latest);
-        const Reminder *r = tx ? m_store->reminder(id) : nullptr;
-        const QTimeZone zone = now.timeRepresentation();
-        if (!r || r->completed || r->dueAt(zone) != shown.dueAt)
+        if (!tx)
             return;
+        const Reminder *r = m_store->reminder(id);
+        if (!r || r->completed || r->occurrence() != shown.occurrence) {
+            m_shown.remove(notification);
+            return;
+        }
         if (action == "done") {
             m_store->complete(id, now);
         } else if (action == "hour" || action == "tomorrow") {
-            const QDateTime morning(now.date().addDays(1), QTime(Reminder::allDayAlertMinutes / 60, 0), zone);
+            const QDateTime morning(now.date().addDays(1), QTime(Reminder::allDayAlertMinutes / 60, 0),
+                                    now.timeRepresentation());
             const qint64 until = action == "hour" ? now.toSecsSinceEpoch() + 3600 : morning.toSecsSinceEpoch();
-            m_store->setAlerted(id, r->alertedDue, r->alertedEarly, until);
+            if (!m_store->setAlerted(id, r->alertedDue, std::nullopt, until))
+                return;
         }
+        if (!tx.commit())
+            return;
+        m_shown.remove(notification);
     }
     check(now);
 }

@@ -1,11 +1,24 @@
 {
   "%n reminders": {"one": "%n reminder", "other": "%n reminders"},
   "%n reminders are coming up": {"one": "%n reminder is coming up", "other": "%n reminders are coming up"},
+  "A list named “%1” already exists.": "A list named “%1” already exists.",
+  "A selected reminder changed before completion. Nothing was changed.": "A selected reminder changed before completion. Nothing was changed.",
+  "The backup has invalid or duplicate section ids.": "The backup has invalid or duplicate section ids.",
+  "A reminder in the backup names the wrong section.": "A reminder in the backup names the wrong section.",
+  "Could not select reminder %1 for the picture.": "Could not select reminder %1 for the picture.",
+  "Unknown picture format for %1.": "Unknown picture format for %1.",
+  "Could not write %1.": "Could not write %1.",
+  "A reminder in the backup has an invalid date or time.": "A reminder in the backup has an invalid date or time.",
+  "Could not check background reminders: %1": "Could not check background reminders: %1",
   "Every %n days": { "one": "Every %n day", "other": "Every %n days" },
   "Every %n weeks": { "one": "Every %n week", "other": "Every %n weeks" },
   "Every %n months": { "one": "Every %n month", "other": "Every %n months" },
   "Every %n years": { "one": "Every %n year", "other": "Every %n years" },
   "%n reminders are due": { "one": "%n reminder is due", "other": "%n reminders are due" },
   "Deleted %n completed reminders": { "one": "Deleted %n completed reminder", "other": "Deleted %n completed reminders" },
-  "Its %Ln reminders are deleted with it. Undo brings them back.": { "one": "Its reminder is deleted with it. Undo brings it back.", "other": "Its %Ln reminders are deleted with it. Undo brings them back." }
+  "Its %Ln reminders are deleted with it. Undo brings them back.": { "one": "Its reminder is deleted with it. Undo brings it back.", "other": "Its %Ln reminders are deleted with it. Undo brings them back." },
+  "More than one list matches “%1”. Rename a list in the window.": "More than one list matches “%1”. Rename a list in the window.",
+  "The backup has invalid or duplicate list ids.": "The backup has invalid or duplicate list ids.",
+  "The repeat would start after it ends.": "The repeat would start after it ends.",
+  "systemctl exited with status %1": "systemctl exited with status %1"
 }

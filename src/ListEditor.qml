@@ -24,12 +24,12 @@ Popup {
         name.selectAll()
     }
     function save() {
-        if (listId)
-            backend.updateList(listId, name.text === originalName ? "" : name.text,
-                               chosen === originalColor ? "" : chosen)
-        else
-            backend.addList(name.text, chosen)
-        close()
+        const saved = listId
+            ? backend.updateList(listId, name.text === originalName ? "" : name.text,
+                                 chosen === originalColor ? "" : chosen)
+            : backend.addList(name.text, chosen)
+        if (saved)
+            close()
     }
     function step(delta) {
         const names = look.swatchNames

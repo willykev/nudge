@@ -87,12 +87,24 @@ private:
     // that was due then, the moment its buttons answer for.
     struct Shown {
         qint64 id = 0;
-        qint64 dueAt = 0;
+        Reminder::Occurrence occurrence;
         QString title, body; // as shown, to show again without buttons
+    };
+
+    struct Pending {
+        Reminder reminder;
+        qint64 dueAt, earlyAt, when;
+        bool early, due, snoozed;
+        bool sameAlert(const Pending &other) const {
+            return reminder.occurrence() == other.reminder.occurrence() && early == other.early &&
+                   (!early || reminder.early == other.reminder.early) && due == other.due &&
+                   snoozed == other.snoozed && reminder.snoozeUntil == other.reminder.snoozeUntil;
+        }
     };
 
     Store *m_store;
     Alerts *m_alerts;
+    QHash<qint64, Pending> m_unrecorded; // already shown, still waiting for a successful write
     QTimer m_timer;
     QHash<quint32, Shown> m_shown;
     bool m_checking = false;

@@ -14,6 +14,7 @@ Rectangle {
     property var item: ({})
     readonly property bool has: item.id !== undefined
     property var loadedId: 0
+    readonly property string viewKey: backend.viewKey
 
     readonly property var repeatUnits: ["never", "daily", "weekdays", "weekly", "monthly", "yearly"]
     readonly property var earlyMinutes: [0, 5, 15, 30, 60, 120, 1440, 2880, 10080]
@@ -39,9 +40,11 @@ Rectangle {
             flush()
         const selected = backend.selected
         const another = (selected.id || 0) !== loadedId
+        const occurrenceChanged = item.dateIso !== selected.dateIso || item.minutes !== selected.minutes
+                                  || item.lateFold !== selected.lateFold || item.done !== selected.done
         loadedId = selected.id || 0
         item = selected
-        if (another) {
+        if (another || occurrenceChanged) {
             for (const field of [titleField, linkField, dateField, timeField, endField, tagsField])
                 field.showValue()
             notesArea.text = notesArea.value
@@ -51,12 +54,18 @@ Rectangle {
     Connections {
         target: backend
         function onSelectedChanged() { pane.load() }
-        // A new view can pick the reminder being filled in as its first row,
-        // so the selection reads the same, yet the view leaving it settles
-        // it: what was typed for it is saved first.
-        function onViewChanged() { pane.flush() }
     }
+    // A new view can pick the same reminder as its first row. Save its edits
+    // before leaving the old view, even when the selection stays the same.
+    onViewKeyChanged: if (loadedId) flush()
     Component.onCompleted: load()
+
+    component DetailField: InputField {
+        required property string fieldName
+        editSource: pane.item
+        value: pane.item[fieldName] || ""
+        save: (text, original) => backend.saveDetail(original, fieldName, text)
+    }
 
     // Small and bold, as the shell heads the sections of its panels.
     component Caption: Text {
@@ -95,11 +104,10 @@ Rectangle {
             spacing: 5
 
             Caption { text: qsTr("Title") }
-            InputField {
+            DetailField {
                 id: titleField
+                fieldName: "title"
                 Layout.fillWidth: true
-                value: pane.item.title || ""
-                save: text => backend.setTitle(pane.loadedId, text)
             }
 
             Caption { text: qsTr("Notes") }
@@ -138,11 +146,10 @@ Rectangle {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
-                InputField {
+                DetailField {
                     id: linkField
+                    fieldName: "url"
                     Layout.fillWidth: true
-                    value: pane.item.url || ""
-                    save: text => backend.setUrl(pane.loadedId, text)
                 }
                 PushButton {
                     visible: pane.item.hasLink === true
@@ -157,12 +164,12 @@ Rectangle {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
-                InputField {
+                DetailField {
                     id: dateField
+                    fieldName: "date"
                     Layout.fillWidth: true
                     placeholderText: qsTr("Date")
-                    value: pane.item.date || ""
-                    save: text => backend.setDate(pane.loadedId, text)
+                    storedValue: pane.item.dateIso || ""
                 }
                 Rectangle {
                     implicitWidth: 30
@@ -176,27 +183,27 @@ Rectangle {
                     HoverHandler { id: pickHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: app.chooseDate(pane.loadedId, pane.item.dateIso) }
                 }
-                InputField {
+                DetailField {
                     id: timeField
+                    fieldName: "time"
                     Layout.preferredWidth: 92
                     placeholderText: qsTr("Time")
-                    value: pane.item.time || ""
-                    save: text => backend.setTime(pane.loadedId, text)
+                    storedValue: String(pane.item.minutes ?? -1)
                 }
             }
             Flow {
                 Layout.fillWidth: true
                 Layout.topMargin: 3
                 spacing: 6
-                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("Today"); onClicked: backend.setDueIn(pane.loadedId, 0) }
-                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("Tomorrow"); onClicked: backend.setDueIn(pane.loadedId, 1) }
-                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("In a Week"); onClicked: backend.setDueIn(pane.loadedId, 7) }
+                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("Today"); onClicked: { if (backend.setDueIn(pane.loadedId, 0)) dateField.showValue() } }
+                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("Tomorrow"); onClicked: { if (backend.setDueIn(pane.loadedId, 1)) dateField.showValue() } }
+                PushButton { compact: true; activeFocusOnTab: false; text: qsTr("In a Week"); onClicked: { if (backend.setDueIn(pane.loadedId, 7)) dateField.showValue() } }
                 PushButton {
                     visible: pane.item.dateIso !== ""
                     compact: true
                     activeFocusOnTab: false
                     text: qsTr("No Date")
-                    onClicked: backend.clearDue(pane.loadedId)
+                    onClicked: { if (backend.clearDue(pane.loadedId)) dateField.showValue() }
                 }
             }
 
@@ -241,13 +248,13 @@ Rectangle {
                 font.pixelSize: app.fsSmall
             }
             Caption { visible: endField.visible; text: qsTr("Ends") }
-            InputField {
+            DetailField {
                 id: endField
+                fieldName: "repeatEnd"
                 objectName: "repeatEnd"
                 visible: repeatBox.selectedIndex > 0
                 Layout.fillWidth: true
-                value: pane.item.repeatEnd || ""
-                save: text => backend.setRepeatEnd(pane.loadedId, text)
+                storedValue: pane.item.endIso || ""
             }
 
             Caption { visible: pane.item.dateIso !== ""; text: qsTr("Early Reminder") }
@@ -292,11 +299,10 @@ Rectangle {
             }
 
             Caption { text: qsTr("Tags") }
-            InputField {
+            DetailField {
                 id: tagsField
+                fieldName: "tags"
                 Layout.fillWidth: true
-                value: pane.item.tags || ""
-                save: text => backend.setTags(pane.loadedId, text)
             }
         }
     }
