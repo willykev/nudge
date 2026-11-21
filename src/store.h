@@ -64,6 +64,8 @@ struct Reminder {
     // Alert bookkeeping: the moments already announced, and a snooze.
     qint64 alertedDue = 0, alertedEarly = 0, snoozeUntil = 0;
 
+    bool earlyConfirmed = false; // the saved mark identifies this local occurrence and lead
+
     bool operator==(const Reminder &) const = default;
     bool hasText() const; // title, notes, or link entered for a draft
     bool hasContent() const;
@@ -75,6 +77,7 @@ struct Reminder {
         bool operator==(const Occurrence &) const = default;
     };
     Occurrence occurrence() const { return {due, dueMinutes, lateFold}; }
+    QDate nextOccurrence(const QDateTime &now) const;
     qint64 dueAt(const QTimeZone &zone = QTimeZone::LocalTime) const; // 0 without a date
     qint64 scheduledSince() const { return scheduledAt ? scheduledAt : modifiedAt; }
     qint64 earlySince() const { return earlyScheduledAt ? earlyScheduledAt : scheduledSince(); }
@@ -136,6 +139,7 @@ public:
     // An edit that moves a reminder uses the normal clock time unless an
     // entry explicitly chose the later fold for the new time.
     qint64 put(Reminder reminder, bool keepFold = false);
+    qint64 importReminder(Reminder reminder); // preserve a schedule already saved in a backup
     qint64 put(TaskList list);
     qint64 put(Section section);
     void removeReminder(qint64 id); // and its subtasks
@@ -160,7 +164,7 @@ public:
     void clearUndo();                           // nothing done so far can be undone
     void discardLast(const QString &mergeKey);  // take back a step for good
 
-    void setAlerted(qint64 id, qint64 due, qint64 early, qint64 snoozeUntil);
+    bool setAlerted(qint64 id, qint64 due, std::optional<qint64> early, qint64 snoozeUntil);
     QString meta(const QString &key) const;
     void setMeta(const QString &key, const QString &value);
 
@@ -214,7 +218,10 @@ private:
     template <typename T> bool rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*fetch)(qint64));
     bool hasColumn(const QString &table, const QString &column);
     void keepPrivate();
+    enum class Schedule { Edit, KeepFold, Restore };
+    qint64 saveReminder(Reminder reminder, Schedule schedule);
     bool write(Reminder &reminder);
+    bool writeEarlyIdentity(qint64 id, const QString &identity);
     bool write(TaskList &list);
     bool write(Section &section);
     bool erase(const char *table, qint64 id);

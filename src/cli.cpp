@@ -141,11 +141,14 @@ QJsonValue isoMoment(qint64 seconds) {
                    : QJsonValue();
 }
 
-std::optional<qint64> readMoment(const QJsonValue &value) {
+std::optional<qint64> readMoment(const QJsonValue &value, bool requireOffset = false) {
     if (value.isUndefined() || value.isNull())
         return 0;
     const QDateTime time = QDateTime::fromString(value.toString(), Qt::ISODate);
-    if (!time.isValid())
+    // Early exports wrote local completion and creation times. Snoozes have
+    // always been exported as UTC instants.
+    if (!time.isValid() || (requireOffset && (time.timeSpec() == Qt::LocalTime ||
+                                              !value.toString().contains('T', Qt::CaseInsensitive))))
         return std::nullopt;
     return time.toSecsSinceEpoch();
 }
@@ -222,10 +225,11 @@ bool readRepeat(const QString &text, const QDate &today, Reminder &r) {
         return false;
     if (repeat.unit == Repeat::Weekdays)
         date = Repeat::firstWorkday(date);
-    if (r.due != date)
+    const bool moved = r.due != date;
+    if (moved)
         r.lateFold = false;
+    r.repeat = repeat.anchored(date, moved ? QString() : r.repeat);
     r.due = date;
-    r.repeat = repeat.anchored(date, r.repeat);
     return true;
 }
 
@@ -265,11 +269,11 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
     if (parser.isSet("url"))
         r.url = parser.value("url").trimmed();
     if (parser.isSet("due")) {
-        r.lateFold = false;
         const QString text = parser.value("due");
         if (text == "none") {
             // Without a date there is nothing to repeat or to alert ahead of.
             r.due = QDate();
+            r.lateFold = false;
             r.dueMinutes = -1;
             r.repeat.clear();
             r.repeatEnd = QDate();
@@ -278,20 +282,24 @@ QString applyOptions(const QCommandLineParser &parser, Store &store, Reminder &r
             const QDate date = Dates::parseDate(text, today);
             if (!date.isValid())
                 return QString("Could not read %1 as a date. Try 2026-12-24, tomorrow, or \"next friday\".").arg(text);
-            if (r.due != date)
+            if (r.due != date) {
                 r.repeat = Repeat::parse(r.repeat).anchored(date);
+                r.lateFold = false;
+            }
             r.due = date;
         }
     }
     if (parser.isSet("time")) {
-        r.lateFold = false;
         const QString text = parser.value("time");
         if (text == "none") {
+            r.lateFold = false;
             r.dueMinutes = -1;
         } else {
             const int minutes = Dates::parseTime(text);
             if (minutes < 0)
                 return QString("Could not read %1 as a time. Try 17:30 or 5pm.").arg(text);
+            if (r.dueMinutes != minutes)
+                r.lateFold = false;
             r.dueMinutes = minutes;
             // A time needs a day: the next one the clock shows that time on.
             if (!r.due.isValid())
@@ -476,11 +484,54 @@ int edit(const QStringList &arguments) {
     return report(command, store, id, "Changed");
 }
 
+// Called with the write lock held. A final parent completes its open children
+// itself. A continuing parent resets its checklist after its children finish.
+bool completeSelected(Store &store, const QVector<qint64> &ids, const QHash<qint64, Reminder> &selected,
+                      QSet<qint64> &acted) {
+    const auto now = QDateTime::currentDateTime();
+    QVector<qint64> children, parents;
+    QSet<qint64> finalParents, parentsOfSelected;
+    for (const Reminder &r : selected)
+        if (r.parentId)
+            parentsOfSelected.insert(r.parentId);
+    for (qint64 id : ids) {
+        const auto offered = selected.constFind(id);
+        const Reminder *r = store.reminder(id);
+        if (!r || r->occurrence() != offered->occurrence() || r->completed != offered->completed ||
+            r->draft != offered->draft || r->parentId != offered->parentId) {
+            // Skipping just one member could let its selected parent complete
+            // the next occurrence, or a child check off the next checklist.
+            if (parentsOfSelected.contains(id) || selected.contains(offered->parentId) ||
+                (r && selected.contains(r->parentId)))
+                return false;
+            continue;
+        }
+        if (r->completed || r->draft)
+            continue;
+        if (r->parentId) {
+            children << id;
+        } else {
+            parents << id;
+            if (!r->nextOccurrence(now).isValid())
+                finalParents.insert(id);
+        }
+    }
+    for (qint64 id : children + parents) {
+        if (!finalParents.contains(store.reminder(id)->parentId)) {
+            bool completed = false;
+            store.complete(id, now, &completed);
+            if (!completed)
+                continue;
+        }
+        acted.insert(id);
+    }
+    return true;
+}
+
 // done, reopen, and delete all take one or more ids, and do nothing unless
 // every one of them exists. An id named twice is acted on once: done twice
 // would skip a repeating reminder's next date.
-int each(const QStringList &arguments, const QString &name, const QString &description, const QString &verb,
-         const std::function<bool(Store &, qint64)> &action) {
+int each(const QStringList &arguments, const QString &name, const QString &description, const QString &verb) {
     Command command(name, description);
     command.parser.addPositionalArgument("id", "One or more reminders", "<id>...");
     command.json();
@@ -507,32 +558,23 @@ int each(const QStringList &arguments, const QString &name, const QString &descr
     Store::Tx tx(&store, {}, Store::Latest);
     if (!tx)
         return failures.report("Nothing was changed");
-    QVector<qint64> order = ids;
-    const bool completing = name == "done";
-    if (completing) {
-        // If another process moved an occurrence while the command waited for
-        // the write lock, the one offered at the start is no longer open.
-        order.removeIf([&](qint64 id) {
-            const Reminder &offered = selected[id];
-            const Reminder *current = store.reminder(id);
-            return offered.completed || offered.draft || !current || current->completed || current->draft ||
-                   current->occurrence() != offered.occurrence();
-        });
-        // A parent's last completion also completes its open children.
-        // Do it first, even if a child was named first on the command line.
-        std::stable_partition(order.begin(), order.end(), [&](qint64 id) { return !store.reminder(id)->parentId; });
-    }
     QSet<qint64> acted;
-    for (qint64 id : std::as_const(order)) {
-        if (completing) {
-            const Reminder *current = store.reminder(id);
-            if (current->completed || current->occurrence() != selected[id].occurrence()) {
-                acted.insert(id); // its parent already completed the selected occurrence
-                continue;
-            }
+    if (name == "done") {
+        if (!completeSelected(store, ids, selected, acted))
+            return fail("A selected reminder changed before completion. Nothing was changed.");
+    } else if (name == "delete") {
+        for (qint64 id : std::as_const(ids))
+            if (!store.reminder(id))
+                return fail("There is no reminder " + QString::number(id) + ". Nothing was changed.");
+        for (qint64 id : std::as_const(ids)) {
+            if (store.reminder(id))
+                store.removeReminder(id);
+            acted.insert(id); // a selected parent may already have removed it
         }
-        if (action(store, id))
-            acted.insert(id);
+    } else {
+        for (qint64 id : std::as_const(ids))
+            if (store.reopen(id))
+                acted.insert(id);
     }
     if (!tx.commit() || failures.any())
         return failures.report("Nothing was changed");
@@ -671,7 +713,7 @@ int lists(const QStringList &arguments) {
     if (!ready(store))
         return 1;
     const QString action = command.arguments().value(0);
-    const QString name = command.arguments().mid(1).join(' ').simplified();
+    const QString givenName = command.arguments().mid(1).join(' ');
     auto count = [&](qint64 listId, bool openOnly) {
         int total = 0;
         for (const Reminder &r : store.reminders())
@@ -680,6 +722,7 @@ int lists(const QStringList &arguments) {
     };
 
     if (action == "add") {
+        const QString name = givenName.simplified();
         if (name.isEmpty())
             return fail("Name the list: nudge lists add Groceries");
         Failures failures(store);
@@ -714,7 +757,7 @@ int lists(const QStringList &arguments) {
         if (!tx)
             return failures.report("The list could not be deleted");
         QString error;
-        const TaskList *doomed = listNamed(store, name, error);
+        const TaskList *doomed = listNamed(store, givenName, error);
         if (!doomed)
             return fail(error);
         const int holding = count(doomed->id, false);
@@ -828,10 +871,12 @@ std::optional<Reminder> reminderFromBackup(const QJsonObject &entry, const QDate
         return std::nullopt;
     const bool hadDate = r.due.isValid();
     r.repeat = Repeat::parse(entry.value("repeat").toString()).toString();
-    // Older backups could carry a repeat with no date. Start it as if its
-    // rule were set today.
-    if (!hadDate && !r.repeat.isEmpty())
-        r.due = today;
+    // Start a dateless legacy series only while it still has an occurrence.
+    if (!hadDate && !r.repeat.isEmpty()) {
+        const QDate start = r.repeat == "weekdays" ? Repeat::firstWorkday(today) : today;
+        if (!r.repeatEnd.isValid() || start <= r.repeatEnd)
+            r.due = start;
+    }
     r.dueMinutes = r.due.isValid() && time.isValid() ? time.hour() * 60 + time.minute() : -1;
     r.lateFold = hadDate && r.dueMinutes >= 0 && entry.value("lateFold").toBool();
     r.early = entry.value("early").toInt();
@@ -842,7 +887,7 @@ std::optional<Reminder> reminderFromBackup(const QJsonObject &entry, const QDate
             r.tags << text;
     r.completed = entry.value("completed").toBool();
     const auto completed = readMoment(entry.value("completedAt")), created = readMoment(entry.value("createdAt")),
-               snooze = readMoment(entry.value("snoozeUntil"));
+               snooze = readMoment(entry.value("snoozeUntil"), true);
     if (!completed || !created || !snooze)
         return std::nullopt;
     r.completedAt = *completed;
@@ -900,13 +945,13 @@ int importAll(const QStringList &arguments) {
         if (row.oldParent && row.reminder.hasContent())
             neededParents.insert(row.oldParent);
     }
-    const int skipped = int(imported.removeIf([&](const Imported &row) {
-        return !row.reminder.hasContent() && !neededParents.contains(row.oldId);
-    }));
     QSet<QString> incomingNames;
-    for (const Imported &row : std::as_const(imported))
-        incomingNames.insert(row.entry.value("list").toString());
     QSet<qint64> declaredLists;
+    struct SectionName {
+        qint64 listId;
+        QString list, section;
+    };
+    QHash<qint64, SectionName> declaredSections;
     for (const QJsonValue &value : document.value("lists").toArray()) {
         const QJsonObject entry = value.toObject();
         if (entry.value("name").toString().trimmed().isEmpty() ||
@@ -919,8 +964,39 @@ int importAll(const QStringList &arguments) {
                 return fail("The backup has invalid or duplicate list ids.");
             declaredLists.insert(id);
         }
-        incomingNames.insert(entry.value("name").toString());
+        const QString listName = entry.value("name").toString();
+        incomingNames.insert(listName);
+        if (entry.contains("sectionIds")) {
+            const QJsonValue ids = entry.value("sectionIds");
+            const QJsonArray sectionIds = ids.toArray(), names = entry.value("sections").toArray();
+            if (!ids.isArray() || sectionIds.size() != names.size())
+                return fail("The backup has invalid or duplicate section ids.");
+            for (qsizetype i = 0; i < names.size(); ++i) {
+                const qint64 id = sectionIds.at(i).toInteger();
+                const QString name = names.at(i).toString();
+                if (id <= 0 || name.isEmpty() || declaredSections.contains(id))
+                    return fail("The backup has invalid or duplicate section ids.");
+                declaredSections.insert(id, {idValue.toInteger(), listName, name});
+            }
+        }
     }
+    for (const Imported &row : std::as_const(imported)) {
+        const auto id = row.entry.value("sectionId");
+        if (id.isNull() || id.isUndefined())
+            continue;
+        const auto section = declaredSections.constFind(id.toInteger());
+        const auto listId = row.entry.value("listId").toInteger();
+        const auto listName = row.entry.value("list"), sectionName = row.entry.value("section");
+        if (section == declaredSections.cend() || section->listId != listId ||
+            ((!listId || !listName.isUndefined()) && section->list != listName.toString()) ||
+            (!sectionName.isUndefined() && section->section != sectionName.toString()))
+            return fail("A reminder in the backup names the wrong section.");
+    }
+    const int skipped = int(imported.removeIf([&](const Imported &row) {
+        return !row.reminder.hasContent() && !neededParents.contains(row.oldId);
+    }));
+    for (const Imported &row : std::as_const(imported))
+        incomingNames.insert(row.entry.value("list").toString());
 
     Store store;
     if (!ready(store))
@@ -1058,7 +1134,7 @@ int importAll(const QStringList &arguments) {
             // the parent it came with.
             if (const Reminder *parent = store.reminder(r.parentId); !r.completed && parent && parent->completed)
                 store.reopen(r.parentId);
-            const qint64 id = store.put(r);
+            const qint64 id = store.importReminder(r);
             if (oldId)
                 newIds.insert(oldId, id);
             added += id != 0;
@@ -1110,16 +1186,13 @@ int background(const QStringList &arguments, const QString &unitFile) {
     if (!state.isEmpty() && systemctl({state == "on" ? "enable" : "disable", "--now", "nudge.service"}) != 0)
         return fail("systemctl could not turn background reminders " + state + ": " + error);
     const int code = systemctl({"is-enabled", "nudge.service"});
-    const bool on = code == 0 && (output == "enabled" || output == "enabled-runtime");
-    static const QStringList off{"disabled", "masked", "masked-runtime", "linked", "linked-runtime",
-                                 "static", "indirect", "alias", "generated", "transient"};
-    const bool knownOff = (code == 0 || code == 1) && off.contains(output);
-    if (!on && !knownOff)
+    const auto on = backgroundEnabled(output, code);
+    if (!on.has_value())
         return fail(QString("Could not check background reminders: %1").arg(error));
     if (command.wantsJson())
-        print({{"background", on}});
+        print({{"background", *on}});
     else
-        print(stdout, on ? "Reminders arrive even when the window is closed."
+        print(stdout, *on ? "Reminders arrive even when the window is closed."
                          : "Reminders only arrive while the window is open.");
     return 0;
 }
@@ -1224,6 +1297,16 @@ QString cliSummary() {
            "  daemon                   Send the alerts; the background service runs this";
 }
 
+std::optional<bool> backgroundEnabled(const QString &output, int exitCode) {
+    if (exitCode == 0 && (output == "enabled" || output == "enabled-runtime"))
+        return true;
+    static const QStringList off{"disabled", "masked", "masked-runtime", "linked", "linked-runtime",
+                                 "static", "indirect", "alias", "generated", "transient"};
+    if ((exitCode == 0 || exitCode == 1) && off.contains(output))
+        return false;
+    return std::nullopt;
+}
+
 bool isCliCommand(const QString &word) {
     return QStringList{"add", "list", "show", "edit", "done", "reopen", "delete", "lists", "export",
                        "import", "background", "skill", "help"}
@@ -1241,18 +1324,11 @@ int runCli(const QStringList &arguments, const QString &unitFile) {
     if (command == "edit")
         return edit(arguments);
     if (command == "done")
-        return each(arguments, "done", "Complete reminders. A repeating one moves to its next date.", "Completed",
-                    [](Store &store, qint64 id) {
-                        bool completed = false;
-                        store.complete(id, QDateTime::currentDateTime(), &completed);
-                        return completed;
-                    });
+        return each(arguments, "done", "Complete reminders. A repeating one moves to its next date.", "Completed");
     if (command == "reopen")
-        return each(arguments, "reopen", "Mark reminders as not done.", "Reopened",
-                    [](Store &store, qint64 id) { return store.reopen(id); });
+        return each(arguments, "reopen", "Mark reminders as not done.", "Reopened");
     if (command == "delete")
-        return each(arguments, "delete", "Delete reminders, with their subtasks.", "Deleted",
-                    [](Store &store, qint64 id) { store.removeReminder(id); return true; });
+        return each(arguments, "delete", "Delete reminders, with their subtasks.", "Deleted");
     if (command == "lists")
         return lists(arguments);
     if (command == "export")

@@ -76,10 +76,11 @@ or `on 24.12.` to tell Nudge the number is a date. Use `2026-12-24` for a date
 you can paste in any language. A named date in a title can take a year from
 1900 through 2199 directly. For other years use a comma, as in `Dec 1, 1200`,
 or write the date out as `1200-12-01`. The editable Date and Ends fields
-include the year so you can copy a date and paste it back. Changing the
-desktop language keeps the text you are typing in the Date field. In the
-calendar, use the arrow keys to move a day or week, Page Up or Page Down to
-change months, and Return to pick a date.
+include the year so you can copy a date and paste it back. If you change the
+desktop language while typing, Return reads your entry in the language you
+started with. Choosing **Today** or another date replaces the Date field’s
+pending text. In the calendar, use the arrow keys to move a day or week,
+Page Up or Page Down to change months, and Return to pick a date.
 
 For a time without am or pm, Nudge reads 1 to 7 as afternoon, 8 to 11 as
 morning, and 12 as noon. On a 12-hour clock that makes `5:30` 17:30.
@@ -100,13 +101,17 @@ after the given start date. Type `every 2 weeks until 2027-06-01` to set an
 end date. The due date can fall on the end date or earlier. If the day is absent
 from a month or year, a monthly or yearly reminder uses the last day of
 that month and keeps its original day for later occurrences, including
-when you edit the end date.
+when you edit the end date. To pick a new day, give the series a new start,
+for example `nudge edit 12 --repeat "every month on 2031-03-15"`.
 
 Completing a repeat leaves a completed occurrence and moves the reminder
 forward. If you complete a one-off reminder that has a repeating subtask,
 the subtask's next occurrence becomes a reminder of its own in the same list
 and section. You can name both IDs in one `nudge done` command. Each current
-occurrence is completed once, in either argument order.
+occurrence is completed once, in either argument order. For a repeating
+parent, the next checklist opens with its ordinary subtasks unchecked. If a
+selected family member moves on while the command is waiting, the batch
+stops so you can check the current occurrence.
 
 ## Shortcuts
 
@@ -192,7 +197,9 @@ and is the one to pass to `nudge reopen`.
 Give each list a distinct name. If a command finds two lists with the same
 name in an older database, select one in the sidebar and press Return to rename it.
 To capture a specific reminder with its details, use
-`nudge open --reminder 12 --details --screenshot reminder.png`.
+`nudge open --reminder 12 --details --screenshot reminder.png`. If the
+reminder is missing or the image cannot be written, the command exits 1 and
+preserves any existing output file.
 
 `nudge background --json` reports `false` for a disabled service. If the
 service status cannot be read, the command writes the error to stderr and exits 1.
@@ -214,10 +221,12 @@ open database and its journal files. `nudge import backup.json` reads it back
 with its lists, sections, subtasks, completion times, and pending snoozes.
 An older backup can contain a reminder with details and a blank title.
 It comes back as **Untitled reminder**. Import reports how many empty
-reminders it skipped. A repeat saved without a date starts today. A repeat
-set to Weekdays starts on Monday if today is a weekend.
-Import rejects invalid dates and times, including a saved snooze, and lists
-that share an ID. An invalid backup leaves the current reminders alone.
+reminders it skipped. Repeats keep their saved dates, even after the series
+has ended. A dateless repeat starts today, or on Monday for a weekday rule
+restored over the weekend. If that start would fall after its end, it stays
+dateless. Each saved snooze needs a time and a UTC offset or `Z`.
+Invalid dates, duplicate list or section IDs, and references to the wrong
+section cause the whole import to fail before it changes your reminders.
 
 ## What it does not do
 

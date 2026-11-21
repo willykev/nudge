@@ -23,10 +23,12 @@
   repeat leave one entry in Completed.
 - Import checks the backup before saving it. Completion times and pending
   snoozes travel with a backup, and large backups restore faster. Older
-  backups keep untitled reminders with details and give repeats without a
-  date a starting day. Import reports any empty reminders it skips.
-- Import refuses invalid dates and times and duplicate list IDs before
-  changing any lists or reminders.
+  backups keep untitled reminders with details and the saved dates of
+  repeating reminders, including series that have ended. A dateless series
+  gets a starting day if its end still allows one. Import reports empty
+  reminders it skips.
+- Import checks dates, times, snooze offsets, list and section IDs, and
+  section references before changing any lists or reminders.
 
 ### Alerts
 
@@ -41,7 +43,10 @@
   existing window forward.
 - Early and due alerts already delivered stay quiet after a time zone
   change. Editing the early lead while a due alert is being sent keeps
-  that delivery recorded.
+  that delivery recorded. Older databases use the saved alert time to check
+  which lead was delivered.
+- Queued alerts check their reminders again before delivery. An expired
+  snooze can be snoozed again after a temporary database lock.
 
 ### Privacy
 
@@ -50,7 +55,8 @@
   an earlier Nudge made readable by others are made private when opened.
 - An existing folder picked with `NUDGE_DB` keeps its permissions. Export
   refuses the database and its journals as destinations, and taking a
-  screenshot keeps any sample typing separate from saved reminders.
+  screenshot keeps any sample typing separate from saved reminders. A failed
+  screenshot preserves the existing file at its destination.
 
 ### Commands
 
@@ -61,10 +67,16 @@
 - List names are matched exactly when there is an exact match. Search takes a
   tag as it is shown, for example `#health`, and `--literal` keeps the spaces
   in a title. A failed skill install keeps the existing skill where it was.
-- Completing a parent and its repeating subtask in one `nudge done` command
-  leaves the next occurrence open, whichever ID comes first.
-- A failed `nudge background` status check prints the error and exits 1.
-  `nudge open --screenshot` uses the reminder selected with `--reminder`.
+- Completing a parent and subtask together leaves the next occurrence and
+  its checklist open in either argument order. A conflicting change to the
+  selected family cancels the batch. A multi-ID deletion also stops if a
+  selected reminder disappeared while the command was waiting.
+- Deleting a list by name respects its spacing, including repeated spaces.
+- The window and CLI recognize a background service enabled for the current
+  session. A failed status check suppresses the window’s enable prompt and
+  makes `nudge background` print the error and exit 1.
+- `nudge open --screenshot --reminder` reports an error when the requested
+  reminder cannot be selected.
 
 ### Dates and repeats
 
@@ -77,11 +89,14 @@
   stay in Completed when their parent moves forward. A repeating subtask
   carries on in its list when its one-off parent is completed.
 - A time entered on its own can fall in the second occurrence of a repeated
-  hour. `Friday morning at 6` and a written date followed by `morning at 6`
-  both use 06:00. `Tomorrow night at midnight` uses the end of tomorrow, and
-  ranges such as `from 5 pm to 6 pm` stay together in the title.
+  hour. Reapplying its date or time with `nudge edit` keeps that instant.
+  A weekday, written date, or relative date followed by `morning at 6` uses
+  06:00, including `every Friday morning at 6`. `Tomorrow night at midnight`
+  uses the end of tomorrow. Clock ranges and weekday ranges with dayparts
+  stay together in the title.
 - Editing a repeat's end date keeps its original day of the month or year.
-  The window and command line refuse a due date past the end of a repeat.
+  Giving the series a new start day changes its anchor. The window and
+  command line refuse a due date past the end of a repeat.
 
 ### Window
 
@@ -94,8 +109,13 @@
   groups digits in large counts.
 - Moving a reminder into the next section takes its subtasks with it.
   Undo can restore a list's sort order after a command adds a reminder.
-- A language change preserves a date still being typed. The list editor
-  refuses duplicate names, and commands explain how to rename an existing pair.
+- A language change preserves a pending Date, Time, or Ends edit and its
+  original date or clock format. A newer occurrence or an explicit date
+  choice replaces pending text for the old occurrence.
+- A draft title rejected by the repeat end date stays focused for correction.
+- The list editor refuses duplicate names. Undo and Redo retire a rename if
+  another list has claimed its name. Commands explain how to rename an
+  existing pair.
 
 ### Accessibility
 

@@ -98,10 +98,11 @@ ApplicationWindow {
     // The list is a focus scope: handing it the keyboard hands it on to
     // whatever inside it had it last, so that has to let go first.
     function focusList() {
+        if (editingId && !finishEdit(activeEditor ? activeEditor.text : "", false))
+            return false
         pane = "list"
-        if (editingId)
-            finishEdit(activeEditor ? activeEditor.text : "", false)
         listView.forceActiveFocus()
+        return true
     }
     // A title being typed is finished before the selection or the view moves
     // on, so a new reminder's title is part of the step that added it, and
@@ -109,13 +110,15 @@ ApplicationWindow {
     // finishes it.
     function select(id) {
         const editing = editingId
-        focusList()
+        if (!focusList())
+            return false
         if (id !== editing)
             backend.selectedId = id
+        return true
     }
     function showView(key) {
-        focusList()
-        backend.viewKey = key
+        if (focusList())
+            backend.viewKey = key
     }
     function step(delta) {
         if (pane === "sidebar")
@@ -124,7 +127,8 @@ ApplicationWindow {
             backend.selectStep(delta)
     }
     function newReminder() {
-        focusList()
+        if (!focusList())
+            return
         const id = backend.addReminder()
         if (id)
             editingId = id
@@ -155,23 +159,32 @@ ApplicationWindow {
     // list can be written out one line after another. Nothing here takes the
     // keyboard: the field letting go of it leaves it with the list, and a
     // field clicked into keeps it.
+    property bool savingTitle: false
     function finishEdit(text, another) {
         const id = editingId
-        if (!id)
-            return
+        if (!id || savingTitle)
+            return true
         const draft = backend.draftId === id
-        editingId = 0
-        activeEditor = null // so a later edit never saves this one's text
         // A new reminder left blank for a field of the details showing it is
         // still being added there: it stays selected for the details to fill
         // in, until the selection or the view moves on.
         if (draft && !another && text.trim() === "" && backend.selectedId === id && within(activeFocusItem, details)) {
             backend.holdDraft(id)
-            return
+        } else {
+            savingTitle = true
+            const saved = backend.commitTitle(id, text)
+            savingTitle = false
+            if (!saved) {
+                if (activeEditor)
+                    activeEditor.forceActiveFocus()
+                return false
+            }
         }
-        backend.commitTitle(id, text)
+        editingId = 0
+        activeEditor = null
         if (another && draft && text.trim() !== "")
             newReminder()
+        return true
     }
     function within(item, ancestor) {
         for (; item; item = item.parent)
@@ -261,8 +274,11 @@ ApplicationWindow {
     Component.onCompleted: listView.forceActiveFocus()
     // Closing the window mid-word keeps the word, and settles a new reminder
     // the details were filling in.
-    onClosing: {
-        focusList()
+    onClosing: close => {
+        if (!focusList()) {
+            close.accepted = false
+            return
+        }
         details.flush()
         backend.settleDraft()
     }

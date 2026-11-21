@@ -5,6 +5,7 @@
 #include "sidebarmodel.h"
 #include "store.h"
 
+#include <QLocale>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -81,7 +82,7 @@ public:
     QStringList palette() const;
     QString problem() const;
     bool backgroundAvailable() const;
-    bool backgroundOn() const { return m_backgroundOn; }
+    bool backgroundOn() const { return m_backgroundOn.value_or(false); }
     bool backgroundAsk() const;
 
     // Moving around.
@@ -89,11 +90,11 @@ public:
     Q_INVOKABLE void selectEdge(bool last);
     Q_INVOKABLE void stepView(int delta);
     Q_INVOKABLE void reveal(qint64 id);
-    void selectReminder(qint64 id);
+    bool selectReminder(qint64 id);
 
     // Reminders.
     Q_INVOKABLE qint64 addReminder();
-    Q_INVOKABLE void commitTitle(qint64 id, const QString &text);
+    Q_INVOKABLE bool commitTitle(qint64 id, const QString &text);
     // A new reminder the details pane took the keyboard from before it had a
     // title is still being added there, until it is settled: when the
     // selection, the view, or the window leaves it, or another is added.
@@ -103,8 +104,8 @@ public:
     Q_INVOKABLE void toggleCompleted(qint64 id);
     Q_INVOKABLE void toggleFlag(qint64 id);
     Q_INVOKABLE void setPriority(qint64 id, int priority);
-    Q_INVOKABLE void setDueIn(qint64 id, int days);
-    Q_INVOKABLE void clearDue(qint64 id);
+    Q_INVOKABLE bool setDueIn(qint64 id, int days);
+    Q_INVOKABLE bool clearDue(qint64 id);
     Q_INVOKABLE void remove(qint64 id);
     Q_INVOKABLE void indent(qint64 id);
     Q_INVOKABLE void outdent(qint64 id);
@@ -115,14 +116,15 @@ public:
     Q_INVOKABLE void openLink(qint64 id);
 
     // The details pane.
+    Q_INVOKABLE void saveDetail(const QVariantMap &original, const QString &field, const QString &text);
     Q_INVOKABLE void setTitle(qint64 id, const QString &text);
     Q_INVOKABLE void setNotes(qint64 id, const QString &text);
     Q_INVOKABLE void setUrl(qint64 id, const QString &text);
-    Q_INVOKABLE bool setDate(qint64 id, const QString &text);
+    Q_INVOKABLE bool setDate(qint64 id, const QString &text, const QLocale &locale = QLocale());
     Q_INVOKABLE bool setDateIso(qint64 id, const QString &iso);
-    Q_INVOKABLE bool setTime(qint64 id, const QString &text);
+    Q_INVOKABLE bool setTime(qint64 id, const QString &text, const QLocale &locale = QLocale());
     Q_INVOKABLE void setRepeat(qint64 id, const QString &unit, int interval);
-    Q_INVOKABLE bool setRepeatEnd(qint64 id, const QString &text);
+    Q_INVOKABLE bool setRepeatEnd(qint64 id, const QString &text, const QLocale &locale = QLocale());
     Q_INVOKABLE void setEarly(qint64 id, int minutes);
     Q_INVOKABLE void setFlagged(qint64 id, bool flagged);
     Q_INVOKABLE void setTags(qint64 id, const QString &text);
@@ -226,5 +228,6 @@ private:
 
     QString m_systemctl = "systemctl";
     QString m_unitFile = "/usr/lib/systemd/user/nudge.service";
-    bool m_backgroundOn = false;
+    std::optional<bool> m_backgroundOn;
+    QString m_backgroundError;
 };

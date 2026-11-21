@@ -51,6 +51,14 @@ const char *const reminderColumns =
     "repeat_end, early, priority, flagged, tags, completed, completed_at, created_at,"
     "modified_at, position, alerted_due, alerted_early, snooze_until, scheduled_at, late_fold, early_scheduled_at, draft";
 
+const QString selectReminders = QStringLiteral("SELECT ") + QLatin1String(reminderColumns) +
+    ", CASE WHEN alerted_early != 0 THEN (SELECT value FROM meta WHERE key = 'early:' || reminders.id) END FROM reminders";
+
+QString earlyIdentity(const Reminder &r) {
+    return QString("%1/%2/%3/%4/%5").arg(isoDate(r.due)).arg(r.dueMinutes).arg(r.lateFold)
+                                    .arg(r.early).arg(r.alertedEarly);
+}
+
 constexpr int busyTimeoutMs = 4000;
 
 Reminder reminderFrom(const QSqlQuery &query) {
@@ -83,6 +91,7 @@ Reminder reminderFrom(const QSqlQuery &query) {
     r.lateFold = query.value(i++).toBool();
     r.earlyScheduledAt = query.value(i++).toLongLong();
     r.draft = query.value(i++).toBool();
+    r.earlyConfirmed = r.alertedEarly && query.value(i).toString() == earlyIdentity(r);
     return r;
 }
 
@@ -136,7 +145,7 @@ Reminder rebased(const Reminder &current, const Reminder &before, const Reminder
     TAKE(draft);
     TAKE(position);
     TAKE(alertedDue);
-    TAKE(alertedEarly);
+    TAKE2(alertedEarly, earlyConfirmed);
     TAKE(snoozeUntil);
     return merged;
 }
@@ -199,6 +208,10 @@ bool Reminder::hasText() const {
 bool Reminder::hasContent() const {
     return hasText() || due.isValid() ||
            !repeat.isEmpty() || early || priority || flagged || !tags.isEmpty() || completed;
+}
+
+QDate Reminder::nextOccurrence(const QDateTime &now) const {
+    return Repeat::parse(repeat).upcoming(due, dueMinutes, now, repeatEnd);
 }
 
 qint64 Reminder::dueAt(const QTimeZone &zone) const {
@@ -438,13 +451,7 @@ void Store::prepare() {
     m_putSection = QSqlQuery(m_db);
     m_putSection.prepare("INSERT OR REPLACE INTO sections (id, list_id, name, position) VALUES (?, ?, ?, ?)");
     m_setAlerted = QSqlQuery(m_db);
-    // Delivery can overlap another writer. Each mark belongs to the due
-    // occurrence, but only the early mark also belongs to a particular lead.
-    m_setAlerted.prepare(
-        "UPDATE reminders SET alerted_due = CASE WHEN alerted_due = :wasDue THEN :due ELSE alerted_due END, "
-        "alerted_early = CASE WHEN early = :lead AND alerted_early = :wasEarly THEN :early ELSE alerted_early END, "
-        "snooze_until = CASE WHEN snooze_until = :wasSnooze THEN :snooze ELSE snooze_until END "
-        "WHERE id = :id AND completed = 0 AND due = :date AND due_minutes = :minutes AND late_fold = :fold");
+    m_setAlerted.prepare("UPDATE reminders SET alerted_due = ?, alerted_early = ?, snooze_until = ? WHERE id = ?");
 }
 
 // Everything is read in one read transaction, so it is one moment of the
@@ -471,7 +478,7 @@ bool Store::load(bool locked) {
             sections.append(sectionFrom(query));
     }
     ok = ok && !query.lastError().isValid();
-    if (ok && query.exec(QString("SELECT %1 FROM reminders").arg(QLatin1String(reminderColumns)))) {
+    if (ok && query.exec(selectReminders)) {
         while (query.next()) {
             const Reminder r = reminderFrom(query);
             reminders.insert(r.id, r);
@@ -642,6 +649,7 @@ bool Store::commit() {
         return false;
     }
     m_pending.lists.removeIf([](const auto &delta) { return delta.keepOnUndo; });
+    m_pending.reminders.removeIf([](const auto &delta) { return delta.keepOnUndo; });
     const bool written = !m_pending.isEmpty();
     if (written && m_recording) {
         const bool merge = !m_pending.mergeKey.isEmpty() && !m_undo.isEmpty() &&
@@ -736,7 +744,31 @@ bool Store::write(Reminder &r) {
     }
     if (!r.id)
         r.id = query.lastInsertId().toLongLong();
-    return true;
+    const Reminder *before = reminder(r.id);
+    if (r.earlyConfirmed) {
+        const QString identity = earlyIdentity(r);
+        return (before && before->earlyConfirmed && earlyIdentity(*before) == identity) ||
+               writeEarlyIdentity(r.id, identity);
+    }
+    return !before || !before->earlyConfirmed || writeEarlyIdentity(r.id, {});
+}
+
+// A timestamp from an older database has no associated lead. Store the
+// identity of each new early delivery in the same transaction as its mark.
+bool Store::writeEarlyIdentity(qint64 id, const QString &identity) {
+    QSqlQuery query(m_db);
+    if (identity.isEmpty()) {
+        query.prepare("DELETE FROM meta WHERE key = ?");
+    } else {
+        query.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+        query.bindValue(1, identity);
+    }
+    query.bindValue(0, "early:" + QString::number(id));
+    if (query.exec())
+        return true;
+    m_broken = true;
+    fail(query.lastError().text());
+    return false;
 }
 
 bool Store::write(TaskList &list) {
@@ -791,7 +823,7 @@ bool Store::erase(const char *table, qint64 id) {
 
 std::optional<Reminder> Store::fetchReminder(qint64 id) {
     QSqlQuery query(m_db);
-    query.prepare(QString("SELECT %1 FROM reminders WHERE id = ?").arg(QLatin1String(reminderColumns)));
+    query.prepare(selectReminders + " WHERE id = ?");
     query.bindValue(0, id);
     if (!query.exec()) {
         fail(query.lastError().text());
@@ -863,6 +895,14 @@ bool Store::rebase(T &row, std::optional<T> &before, std::optional<T> (Store::*f
 }
 
 qint64 Store::put(Reminder r, bool keepFold) {
+    return saveReminder(std::move(r), keepFold ? Schedule::KeepFold : Schedule::Edit);
+}
+
+qint64 Store::importReminder(Reminder r) {
+    return saveReminder(std::move(r), Schedule::Restore);
+}
+
+qint64 Store::saveReminder(Reminder r, Schedule schedule) {
     if (!m_open)
         return 0;
     std::optional<Reminder> before;
@@ -877,17 +917,19 @@ qint64 Store::put(Reminder r, bool keepFold) {
     if (!r.title.trimmed().isEmpty())
         r.draft = false;
     const QDate requestedDate = r.due;
-    if (r.repeat == "weekdays" && (!before || r.due != before->due || r.repeat != before->repeat))
+    if (schedule != Schedule::Restore && r.repeat == "weekdays" &&
+        (!before || r.due != before->due || r.repeat != before->repeat))
         r.due = Repeat::firstWorkday(r.due);
     if (!r.due.isValid() || r.dueMinutes < 0 || r.due != requestedDate ||
-        (before && !keepFold && (r.due != before->due || r.dueMinutes != before->dueMinutes)))
+        (before && schedule == Schedule::Edit && (r.due != before->due || r.dueMinutes != before->dueMinutes)))
         r.lateFold = false;
-    if (!r.due.isValid() && !r.repeat.isEmpty() && (!before || before->due.isValid() || before->repeat != r.repeat)) {
+    if (schedule != Schedule::Restore && !r.due.isValid() && !r.repeat.isEmpty() &&
+        (!before || before->due.isValid() || before->repeat != r.repeat)) {
         fail(tr("A repeating reminder needs a date."));
         m_broken = true;
         return commit() ? r.id : 0;
     }
-    if (!r.repeat.isEmpty() && r.repeatEnd.isValid() && r.due > r.repeatEnd &&
+    if (schedule != Schedule::Restore && !r.repeat.isEmpty() && r.repeatEnd.isValid() && r.due > r.repeatEnd &&
         (!before || before->due != r.due || before->repeat != r.repeat || before->repeatEnd != r.repeatEnd)) {
         fail(tr("The repeat would start after it ends."));
         m_broken = true;
@@ -925,6 +967,9 @@ qint64 Store::put(Reminder r, bool keepFold) {
         r.alertedDue = r.alertedEarly = r.snoozeUntil = 0;
     else if (before && before->early != r.early)
         r.alertedEarly = 0;
+
+    if (!r.alertedEarly)
+        r.earlyConfirmed = false;
 
     if (write(r)) {
         m_reminders.insert(r.id, r);
@@ -982,7 +1027,7 @@ qint64 Store::put(Section section) {
 
 void Store::eraseReminder(qint64 id) {
     const Reminder *existing = reminder(id);
-    if (!existing || !erase("reminders", id))
+    if (!existing || !erase("reminders", id) || !writeEarlyIdentity(id, {}))
         return;
     m_pending.reminders.append({id, *existing, std::nullopt});
     m_reminders.remove(id);
@@ -1126,9 +1171,6 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
         return {};
     Reminder r = *existing;
     const qint64 seconds = now.toSecsSinceEpoch();
-    auto following = [&now](const Reminder &row) {
-        return Repeat::parse(row.repeat).upcoming(row.due, row.dueMinutes, now, row.repeatEnd);
-    };
     auto advance = [this, seconds](Reminder row, const QDate &date) {
         if (date.isValid()) {
             Reminder history = row;
@@ -1147,7 +1189,7 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
         }
         put(row);
     };
-    const QDate next = following(r);
+    const QDate next = r.nextOccurrence(now);
 
     const QVector<qint64> children = childrenOf(id);
     advance(r, next);
@@ -1176,7 +1218,7 @@ QDate Store::complete(qint64 id, const QDateTime &now, bool *completed) {
             Reminder child = *reminder(childId);
             if (child.completed)
                 continue;
-            const QDate childNext = following(child);
+            const QDate childNext = child.nextOccurrence(now);
             if (childNext.isValid()) {
                 // The child still has something to do after its parent ends.
                 // Keep its completed occurrence with the parent.
@@ -1244,10 +1286,7 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     const Reminder *found = reminder(id);
     const std::optional<Reminder> current = found ? std::optional<Reminder>(*found) : std::nullopt;
     if (!state) {
-        if (!erase("reminders", id))
-            return;
-        m_reminders.remove(id);
-        m_pending.reminders.append({id, current, std::nullopt});
+        eraseReminder(id);
         return;
     }
     Reminder r = *state;
@@ -1255,8 +1294,10 @@ void Store::restore(qint64 id, const std::optional<Reminder> &state) {
     const bool sameMoment = current && current->occurrence() == r.occurrence();
     if (sameMoment) {
         r.alertedDue = current->alertedDue;
-        if (current->early == r.early)
+        if (current->early == r.early) {
             r.alertedEarly = current->alertedEarly;
+            r.earlyConfirmed = current->earlyConfirmed;
+        }
         r.snoozeUntil = current->snoozeUntil;
     } else if (r.snoozeUntil <= r.modifiedAt) {
         r.snoozeUntil = 0;
@@ -1295,17 +1336,49 @@ void Store::restore(qint64 id, const std::optional<Section> &state) {
 // in m_pending, so the step can go on to the other stack as it now stands.
 bool Store::replay(const UndoEntry &entry, bool forward) {
     m_pending = UndoEntry();
-    auto each = [this, forward](const auto &deltas) {
+    // Check the names the whole step would leave. Intermediate names in a
+    // merged rename never reach another connection.
+    QHash<qint64, QString> restoredNames;
+    for (const auto &delta : entry.lists) {
+        if (delta.before && delta.after && delta.before->name == delta.after->name)
+            continue;
+        if (!forward && restoredNames.contains(delta.id))
+            continue;
+        const auto &state = forward ? delta.after : delta.before;
+        restoredNames.insert(delta.id, state ? state->name : QString());
+    }
+    if (!restoredNames.isEmpty()) {
+        QSet<QString> occupied;
+        for (const auto &list : std::as_const(m_lists)) {
+            if (restoredNames.value(list.id, list.name) == list.name) {
+                occupied.insert(list.name);
+                restoredNames.remove(list.id);
+            }
+        }
+        for (const QString &name : std::as_const(restoredNames)) {
+            if (name.isNull())
+                continue;
+            if (occupied.contains(name))
+                return finish(); // retire this step without making an inverse
+            occupied.insert(name);
+        }
+    }
+    auto each = [forward](const auto &deltas, auto apply) {
         if (forward)
-            for (auto it = deltas.cbegin(); it != deltas.cend(); ++it)
-                restore(it->id, it->after);
+            for (const auto &d : deltas)
+                apply(d.id, d.before, d.after);
         else
             for (auto it = deltas.crbegin(); it != deltas.crend(); ++it)
-                restore(it->id, it->before);
+                apply(it->id, it->after, it->before);
     };
-    each(entry.lists);
-    each(entry.sections);
-    each(entry.reminders);
+    each(entry.lists, [this](qint64 id, const auto &from, const auto &to) {
+        const TaskList *current = list(id);
+        // A retired rename can sit above an independent sort or color edit.
+        restore(id, current && from && to ? std::optional(rebased(*current, *from, *to)) : to);
+    });
+    auto restoreRow = [this](qint64 id, const auto &, const auto &to) { restore(id, to); };
+    each(entry.sections, restoreRow);
+    each(entry.reminders, restoreRow);
     return finish();
 }
 
@@ -1346,7 +1419,8 @@ void Store::undo() {
     if (!replay(entry, false))
         return;
     m_undo.removeLast();
-    m_redo.append(inverse(m_pending));
+    if (!m_pending.isEmpty())
+        m_redo.append(inverse(m_pending));
     m_pending = UndoEntry();
     // Whatever comes next is a step of its own, even in the same field.
     sealUndo();
@@ -1361,7 +1435,8 @@ void Store::redo() {
     if (!replay(entry, true))
         return;
     m_redo.removeLast();
-    m_undo.append(m_pending); // with no merge key, so nothing merges into it
+    if (!m_pending.isEmpty())
+        m_undo.append(m_pending); // with no merge key, so nothing merges into it
     m_pending = UndoEntry();
     emit undoChanged();
     emit changed();
@@ -1391,28 +1466,41 @@ void Store::discardLast(const QString &mergeKey) {
     emit changed();
 }
 
-void Store::setAlerted(qint64 id, qint64 due, qint64 early, qint64 snoozeUntil) {
-    const auto found = m_reminders.find(id);
-    if (!m_open || found == m_reminders.end())
-        return;
-    m_setAlerted.bindValue(":id", id);
-    m_setAlerted.bindValue(":date", found->due.isValid() ? isoDate(found->due) : QStringLiteral(""));
-    m_setAlerted.bindValue(":minutes", found->dueMinutes);
-    m_setAlerted.bindValue(":fold", found->lateFold);
-    m_setAlerted.bindValue(":lead", found->early);
-    m_setAlerted.bindValue(":wasDue", found->alertedDue);
-    m_setAlerted.bindValue(":wasEarly", found->alertedEarly);
-    m_setAlerted.bindValue(":wasSnooze", found->snoozeUntil);
-    m_setAlerted.bindValue(":due", due);
-    m_setAlerted.bindValue(":early", early);
-    m_setAlerted.bindValue(":snooze", snoozeUntil);
-    // Memory takes the marks even when the disk does not: an alert that
-    // could not be marked would otherwise go out again every minute.
-    found->alertedDue = due;
-    found->alertedEarly = early;
-    found->snoozeUntil = snoozeUntil;
-    if (!m_setAlerted.exec())
+bool Store::setAlerted(qint64 id, qint64 due, std::optional<qint64> early, qint64 snoozeUntil) {
+    const Reminder *found = reminder(id);
+    if (!found)
+        return false;
+    const Reminder offered = *found;
+    Tx tx(this, {}, Latest);
+    const Reminder *current = tx ? reminder(id) : nullptr;
+    if (!current || current->completed || current->occurrence() != offered.occurrence())
+        return false;
+    Reminder marked = *current;
+    if (current->alertedDue == offered.alertedDue)
+        marked.alertedDue = due;
+    if (early && current->early == offered.early && current->alertedEarly == offered.alertedEarly) {
+        marked.alertedEarly = *early;
+        marked.earlyConfirmed = *early != 0;
+    }
+    if (current->snoozeUntil == offered.snoozeUntil)
+        marked.snoozeUntil = snoozeUntil;
+    if (marked == *current)
+        return tx.commit() && marked.snoozeUntil == snoozeUntil;
+    if ((marked.alertedEarly != current->alertedEarly || marked.earlyConfirmed != current->earlyConfirmed) &&
+        !writeEarlyIdentity(id, marked.earlyConfirmed ? earlyIdentity(marked) : QString()))
+        return false;
+    m_setAlerted.bindValue(0, marked.alertedDue);
+    m_setAlerted.bindValue(1, marked.alertedEarly);
+    m_setAlerted.bindValue(2, marked.snoozeUntil);
+    m_setAlerted.bindValue(3, id);
+    if (!m_setAlerted.exec() || m_setAlerted.numRowsAffected() != 1) {
+        m_broken = true;
         fail(m_setAlerted.lastError().text());
+        return false;
+    }
+    m_pending.reminders.append({id, *current, marked, true}); // rollback only
+    m_reminders.insert(id, marked);
+    return tx.commit() && marked.snoozeUntil == snoozeUntil;
 }
 
 QString Store::meta(const QString &key) const {

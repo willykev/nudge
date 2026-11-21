@@ -4,6 +4,7 @@
 #include <QProcessEnvironment>
 #include <QString>
 #include <QStringList>
+#include <optional>
 
 // The commands that need no window, for scripts and coding agents. Their
 // output stays in English whatever the desktop's language is.
@@ -16,6 +17,7 @@ int runCliInDesktopLocale(const QStringList &arguments, const QString &languageF
 // `session` is the environment it was started with, before Nudge set its own
 // for drawing offscreen; the windows it opens get that one back.
 int runDaemon(const QProcessEnvironment &session);
+std::optional<bool> backgroundEnabled(const QString &output, int exitCode);
 
 // What clicking a background alert runs when no window is open: `nudge open`
 // in the session's environment, through systemd-run when there is one, so the
